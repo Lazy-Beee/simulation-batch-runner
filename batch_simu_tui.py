@@ -12,9 +12,18 @@ from textual.widgets import (
     Static, RichLog, ListView, ListItem, ProgressBar, Select,
 )
 
-from simulation import Simulator, load_config
+from simulation import Simulator, load_config, detect_simulator_type, simulator_supports_mpi
 
 NONE_TASK = "__none__"
+
+
+def format_sim_type_text(exe_path: str) -> str:
+    sim_type = detect_simulator_type(exe_path)
+    if sim_type == "sph":
+        return "Type: SPH (single-process only - MPI not supported)"
+    if sim_type == "cammp":
+        return "Type: CAMMP"
+    return "Type: unknown"
 
 
 class BatchSimuApp(App):
@@ -94,8 +103,9 @@ class BatchSimuApp(App):
                 yield Input(
                     value=self.simulator.default_exe,
                     id="exe_input",
-                    placeholder="path to SPHSimulator.exe",
+                    placeholder="path to SPHSimulator.exe or CAMMP.exe",
                 )
+            yield Static(format_sim_type_text(self.simulator.default_exe), id="sim_type_label")
             with Horizontal(classes="row"):
                 yield Switch(value=True, id="omp_switch")
                 yield Label(f"Limit OMP to {self.simulator.default_omp_threads}")
@@ -173,7 +183,25 @@ class BatchSimuApp(App):
         self.query_one("#start_btn", Button).disabled = False
         self.query_one("#stop_btn", Button).disabled = True
 
+    def apply_sim_type(self, exe_path: str):
+        """Update the type label and gate MPI controls based on the simulator family."""
+        self.query_one("#sim_type_label", Static).update(format_sim_type_text(exe_path))
+        supports = simulator_supports_mpi(detect_simulator_type(exe_path))
+        mpi_switch = self.query_one("#mpi_switch", Switch)
+        mpi_input = self.query_one("#mpi_input", Input)
+        if not supports:
+            mpi_switch.value = False
+        mpi_switch.disabled = not supports
+        mpi_input.disabled = not supports
+
+    def on_mount(self):
+        self.apply_sim_type(self.query_one("#exe_input", Input).value)
+
     # ---------- event handlers ----------
+
+    @on(Input.Changed, "#exe_input")
+    def on_exe_changed(self, event: Input.Changed):
+        self.apply_sim_type(event.value)
 
     @on(Button.Pressed, "#add_btn")
     def on_add(self):
@@ -264,6 +292,11 @@ class BatchSimuApp(App):
             except ValueError:
                 mpi_ranks = self.simulator.default_mpi_ranks
         else:
+            mpi_ranks = 0
+
+        sim_type = detect_simulator_type(exe_path)
+        if not simulator_supports_mpi(sim_type) and mpi_ranks > 0:
+            self.log_line(f"{sim_type.upper()} does not support MPI - forcing single-process.", "warning")
             mpi_ranks = 0
 
         zip_output = self.query_one("#zip_switch", Switch).value

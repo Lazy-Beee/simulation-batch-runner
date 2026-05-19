@@ -32,6 +32,25 @@ class CaseResult(NamedTuple):
     errors: int
 
 
+def detect_simulator_type(exe_path: str) -> str:
+    """Identify the simulator family from the exe path.
+
+    Returns 'sph' if the path contains 'SPlisHSPlasH', 'cammp' if it contains
+    'CAMMP', otherwise 'unknown'. Case-insensitive.
+    """
+    p = exe_path.lower()
+    if "splishsplash" in p:
+        return "sph"
+    if "cammp" in p:
+        return "cammp"
+    return "unknown"
+
+
+def simulator_supports_mpi(sim_type: str) -> bool:
+    """SPHSimulator has no MPI build; CAMMP does. Unknown defaults to allow."""
+    return sim_type != "sph"
+
+
 class TelegramNotice:
     def __init__(self, tg_config):
         self.enabled = tg_config.get("enabled", False)

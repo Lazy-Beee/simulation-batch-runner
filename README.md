@@ -1,6 +1,8 @@
 # Batch Simulation
 
-Batch runner for [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH) `SPHSimulator.exe`. Iterates through a list of scene files, runs each one, and produces a per-case + batch summary. Supports OpenMP thread limiting, MPI launch, output compression with 7-Zip, and Telegram progress notifications.
+Batch runner for [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH) `SPHSimulator.exe` and **CAMMP**. Iterates through a list of scene files, runs each one, and produces a per-case + batch summary. Supports OpenMP thread limiting, MPI launch (CAMMP only), output compression with 7-Zip, and Telegram progress notifications.
+
+Both simulators are invoked the same way (`<exe> --scene-file <path>`) and share the same `[ERROR]` / `[WARNING]` log conventions. The simulator family is auto-detected from the exe path (`SPlisHSPlasH` → SPH, `CAMMP` → CAMMP). MPI is gated by simulator: SPHSimulator has no MPI build, so MPI controls are disabled/ignored when an SPH exe is selected.
 
 Two frontends share the same core (`simulation.py`):
 
@@ -14,7 +16,7 @@ Two frontends share the same core (`simulation.py`):
    Copy-Item config.example.json config.json
    ```
 2. Edit `config.json` for your machine:
-   - `simulator.default_exe` — path to `SPHSimulator.exe`
+   - `simulator.default_exe` — default exe path (SPHSimulator or CAMMP); used when the user input is blank
    - `simulator.output_path` — where the simulator writes case folders
    - `simulator.zip_path` — path to `7z.exe`
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` if you want notifications

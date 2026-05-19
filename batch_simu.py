@@ -4,7 +4,7 @@ import os
 import shlex
 import argparse
 
-from simulation import Simulator, load_config
+from simulation import Simulator, load_config, detect_simulator_type, simulator_supports_mpi
 
 
 def prompt_exe(simulator: Simulator) -> str:
@@ -80,6 +80,8 @@ def main():
     sim = Simulator(config)
 
     exe_path = prompt_exe(sim)
+    sim_type = detect_simulator_type(exe_path)
+    print(f"[INFO] Simulator type: {sim_type.upper() if sim_type != 'unknown' else 'unknown'}")
     batch_exe = sim.prepare_exe(exe_path)
 
     if prompt_omp(sim):
@@ -89,11 +91,15 @@ def main():
         sim.set_omp_env(None)
         print("[INFO] No OMP limit applied - system default.")
 
-    mpi_ranks = prompt_mpi(sim)
-    if mpi_ranks > 0:
-        print(f"[INFO] MPI enabled: {mpi_ranks} ranks via mpiexec.")
+    if simulator_supports_mpi(sim_type):
+        mpi_ranks = prompt_mpi(sim)
+        if mpi_ranks > 0:
+            print(f"[INFO] MPI enabled: {mpi_ranks} ranks via mpiexec.")
+        else:
+            print("[INFO] MPI disabled - single-process.")
     else:
-        print("[INFO] MPI disabled - single-process.")
+        mpi_ranks = 0
+        print(f"[INFO] {sim_type.upper()} does not support MPI - single-process only.")
 
     scene_files = prompt_files()
 

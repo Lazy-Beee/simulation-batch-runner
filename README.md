@@ -20,7 +20,6 @@ Two frontends share the same core (`simulation.py`):
    - `simulator.output_path` — where the simulator writes case folders
    - `simulator.zip_path` — path to `7z.exe`
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` if you want notifications
-   - `sequential_tasks` — map a label to an executable to launch after the batch finishes (e.g. `prime95`)
 3. Install dependencies:
    ```powershell
    pip install -r requirements.txt
@@ -34,7 +33,13 @@ Two frontends share the same core (`simulation.py`):
 python batch_simu_tui.py
 ```
 
-Single-screen layout: configuration panel on top, live log in the middle, status bar with progress at the bottom.
+Three-tab layout:
+
+- **Setup** — simulator path, OMP/MPI options, scene queue, zip/remove switches, Start/Stop, overall progress
+- **Running** — currently executing case header, latest `[step]` line, elapsed time / warnings / errors counters, live log
+- **Done** — per-case results table (case, status, time, warnings, errors) and batch summary
+
+Auto-switches to **Running** on Start and to **Done** when the batch finishes.
 
 Key bindings:
 
@@ -44,17 +49,18 @@ Key bindings:
 | `Ctrl+X` | Stop current case (terminates the subprocess, ends the batch) |
 | `Ctrl+L` | Clear log |
 | `Ctrl+Q` | Quit |
+| `F1` / `F2` / `F3` | Jump to Setup / Running / Done tab |
 
 ## Usage — CLI
 
 ```powershell
-python batch_simu.py [--no-zip] [--keep-output] [--sequential-task <name>]
+python batch_simu.py [--no-zip] [--keep-output]
 ```
 
 The script will prompt for:
 - `SPHSimulator`: path to the simulator exe (blank = use `default_exe` from config)
 - `Limit OMP_NUM_THREADS`: cap OpenMP threads to the configured default
-- `Launch with MPI`: if yes, asks for rank count and uses `mpiexec -n N`
+- `Launch with MPI`: if yes, asks for rank count and uses `mpiexec -n N` (skipped for SPH)
 - `Add scene file`: paste one or more scene paths (quote paths with spaces); empty line to finish
 
 ### Flags
@@ -63,7 +69,6 @@ The script will prompt for:
 |---|---|---|
 | `--no-zip` | Each case's output folder is compressed with 7-Zip | Skip compression |
 | `--keep-output` | Original output folder is deleted after successful compression | Keep the uncompressed folder |
-| `--sequential-task <name>` | None | After the batch finishes, launch the executable mapped to `<name>` in `config.json` (e.g. `--sequential-task P95`) |
 
 ## How it works
 

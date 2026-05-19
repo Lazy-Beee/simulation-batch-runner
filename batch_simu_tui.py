@@ -1,7 +1,9 @@
-"""Textual TUI frontend for batch simulation."""
+"""Textual TUI frontend for batch simulation - 3-tab layout."""
 
 import os
+import time as _time
 import shlex
+import datetime
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -9,12 +11,11 @@ from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
 from textual.widgets import (
     Header, Footer, Input, Label, Button, Switch,
-    Static, RichLog, ListView, ListItem, ProgressBar, Select,
+    Static, RichLog, ListView, ListItem, ProgressBar,
+    TabbedContent, TabPane, DataTable,
 )
 
 from simulation import Simulator, load_config, detect_simulator_type, simulator_supports_mpi
-
-NONE_TASK = "__none__"
 
 
 def format_sim_type_text(exe_path: str) -> str:
@@ -28,53 +29,25 @@ def format_sim_type_text(exe_path: str) -> str:
 
 class BatchSimuApp(App):
     CSS = """
-    Screen {
-        layout: vertical;
-    }
+    Screen { layout: vertical; }
+    TabbedContent { height: 1fr; }
 
-    #config_panel {
-        height: auto;
-        border: solid $accent;
+    .row { height: 3; align: left middle; }
+    Input { width: 1fr; }
+    .narrow { width: 10; }
+    Button { margin-right: 1; }
+    Label { margin: 0 1; }
+
+    #scene_list { height: 8; border: tall $panel; }
+    #log_panel { height: 1fr; border: solid $accent; }
+    #done_table { height: 1fr; }
+
+    #current_case_label, #current_step_label, #current_stats_label {
         padding: 0 1;
     }
+    #current_case_label { color: $accent; text-style: bold; }
 
-    #log_panel {
-        height: 1fr;
-        min-height: 8;
-        border: solid $accent;
-    }
-
-    #status_panel {
-        height: 4;
-        border: solid $accent;
-        padding: 0 1;
-    }
-
-    .row {
-        height: 3;
-        align: left middle;
-    }
-
-    Input {
-        width: 1fr;
-    }
-
-    .narrow {
-        width: 10;
-    }
-
-    #scene_list {
-        height: 6;
-        border: tall $panel;
-    }
-
-    Button {
-        margin-right: 1;
-    }
-
-    Label {
-        margin: 0 1;
-    }
+    #summary_label { padding: 1; text-style: bold; }
     """
 
     BINDINGS = [
@@ -82,6 +55,9 @@ class BatchSimuApp(App):
         Binding("ctrl+x", "stop", "Stop", priority=True),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("f1", "show_tab('setup')", "Setup"),
+        Binding("f2", "show_tab('running')", "Running"),
+        Binding("f3", "show_tab('done')", "Done"),
     ]
 
     def __init__(self):
@@ -93,63 +69,69 @@ class BatchSimuApp(App):
         self.process_holder: list = []
         self.stop_requested = False
         self.batch_running = False
+        self.current_case_start: float | None = None
+        self.current_warnings = 0
+        self.current_errors = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-
-        with Vertical(id="config_panel"):
-            with Horizontal(classes="row"):
-                yield Label("Simulator:")
-                yield Input(
-                    value=self.simulator.default_exe,
-                    id="exe_input",
-                    placeholder="path to SPHSimulator.exe or CAMMP.exe",
-                )
-            yield Static(format_sim_type_text(self.simulator.default_exe), id="sim_type_label")
-            with Horizontal(classes="row"):
-                yield Switch(value=True, id="omp_switch")
-                yield Label(f"Limit OMP to {self.simulator.default_omp_threads}")
-                yield Switch(value=False, id="mpi_switch")
-                yield Label("MPI ranks:")
-                yield Input(
-                    value=str(self.simulator.default_mpi_ranks),
-                    id="mpi_input",
-                    classes="narrow",
-                    type="integer",
-                )
-            with Horizontal(classes="row"):
-                yield Label("Scene:")
-                yield Input(
-                    id="add_file_input",
-                    placeholder="path (Enter to add; quote paths with spaces; multiple allowed)",
-                )
-                yield Button("Add", id="add_btn", variant="primary")
-                yield Button("Remove", id="remove_btn")
-            yield ListView(id="scene_list")
-            with Horizontal(classes="row"):
-                yield Switch(value=True, id="zip_switch")
-                yield Label("Zip output")
-                yield Switch(value=True, id="remove_switch")
-                yield Label("Remove after zip")
-                yield Label("Post-task:")
-                task_options = [("None", NONE_TASK)] + [(k, k) for k in self.simulator.sequential_tasks]
-                yield Select(
-                    options=task_options,
-                    value=NONE_TASK,
-                    id="task_select",
-                    allow_blank=False,
-                )
-            with Horizontal(classes="row"):
-                yield Button("START", id="start_btn", variant="success")
-                yield Button("STOP", id="stop_btn", variant="error", disabled=True)
-                yield Button("Clear log", id="clear_log_btn")
-
-        yield RichLog(id="log_panel", highlight=False, markup=True, wrap=False, max_lines=10000)
-
-        with Vertical(id="status_panel"):
-            yield Static("Idle", id="status_label")
-            yield ProgressBar(id="progress", total=100, show_eta=False)
-
+        with TabbedContent(initial="setup"):
+            with TabPane("Setup", id="setup"):
+                with Vertical():
+                    with Horizontal(classes="row"):
+                        yield Label("Simulator:")
+                        yield Input(
+                            value=self.simulator.default_exe,
+                            id="exe_input",
+                            placeholder="path to SPHSimulator.exe or CAMMP.exe",
+                        )
+                    yield Static(format_sim_type_text(self.simulator.default_exe), id="sim_type_label")
+                    with Horizontal(classes="row"):
+                        yield Switch(value=True, id="omp_switch")
+                        yield Label(f"Limit OMP to {self.simulator.default_omp_threads}")
+                        yield Switch(value=False, id="mpi_switch")
+                        yield Label("MPI ranks:")
+                        yield Input(
+                            value=str(self.simulator.default_mpi_ranks),
+                            id="mpi_input",
+                            classes="narrow",
+                            type="integer",
+                        )
+                    with Horizontal(classes="row"):
+                        yield Label("Scene:")
+                        yield Input(
+                            id="add_file_input",
+                            placeholder="path (Enter to add; quote paths with spaces; multiple allowed)",
+                        )
+                        yield Button("Add", id="add_btn", variant="primary")
+                        yield Button("Remove", id="remove_btn")
+                    yield ListView(id="scene_list")
+                    with Horizontal(classes="row"):
+                        yield Switch(value=True, id="zip_switch")
+                        yield Label("Zip output")
+                        yield Switch(value=True, id="remove_switch")
+                        yield Label("Remove after zip")
+                    with Horizontal(classes="row"):
+                        yield Button("START", id="start_btn", variant="success")
+                        yield Button("STOP", id="stop_btn", variant="error", disabled=True)
+                    yield Static("Idle", id="status_label")
+                    yield ProgressBar(id="progress", total=100, show_eta=False)
+            with TabPane("Running", id="running"):
+                with Vertical():
+                    yield Static("No case running", id="current_case_label")
+                    yield Static("Step: -", id="current_step_label")
+                    yield Static("Elapsed: - | Warnings: 0 | Errors: 0", id="current_stats_label")
+                    yield RichLog(
+                        id="log_panel",
+                        highlight=False,
+                        markup=True,
+                        wrap=False,
+                        max_lines=10000,
+                    )
+            with TabPane("Done", id="done"):
+                with Vertical():
+                    yield Static("No cases completed yet", id="summary_label")
+                    yield DataTable(id="done_table", zebra_stripes=True)
         yield Footer()
 
     # ---------- helpers ----------
@@ -159,12 +141,29 @@ class BatchSimuApp(App):
         line = line.rstrip("\n")
         if kind == "error":
             widget.write(f"[red]{line}[/red]")
+            self.current_errors += 1
+            self._refresh_current_stats()
         elif kind == "warning":
             widget.write(f"[yellow]{line}[/yellow]")
-        elif kind == "info":
+            self.current_warnings += 1
+            self._refresh_current_stats()
+        elif kind == "step":
             widget.write(f"[cyan]{line}[/cyan]")
+            step_text = line[line.find("[step]"):] if "[step]" in line else line
+            self.query_one("#current_step_label", Static).update(f"Step: {step_text}")
+        elif kind == "info":
+            widget.write(f"[blue]{line}[/blue]")
         else:
             widget.write(line)
+
+    def _refresh_current_stats(self):
+        if self.current_case_start is None:
+            return
+        elapsed = round(_time.time() - self.current_case_start)
+        self.query_one("#current_stats_label", Static).update(
+            f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
+            f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
+        )
 
     def set_status(self, text: str):
         self.query_one("#status_label", Static).update(text)
@@ -184,7 +183,6 @@ class BatchSimuApp(App):
         self.query_one("#stop_btn", Button).disabled = True
 
     def apply_sim_type(self, exe_path: str):
-        """Update the type label and gate MPI controls based on the simulator family."""
         self.query_one("#sim_type_label", Static).update(format_sim_type_text(exe_path))
         supports = simulator_supports_mpi(detect_simulator_type(exe_path))
         mpi_switch = self.query_one("#mpi_switch", Switch)
@@ -194,8 +192,49 @@ class BatchSimuApp(App):
         mpi_switch.disabled = not supports
         mpi_input.disabled = not supports
 
+    def switch_tab(self, tab_id: str):
+        try:
+            self.query_one(TabbedContent).active = tab_id
+        except Exception:
+            pass
+
+    def start_current_case(self, case_name: str, idx: int, total: int):
+        self.current_case_start = _time.time()
+        self.current_warnings = 0
+        self.current_errors = 0
+        self.query_one("#current_case_label", Static).update(f"Case: {case_name} ({idx+1}/{total})")
+        self.query_one("#current_step_label", Static).update("Step: -")
+        self._refresh_current_stats()
+
+    def finish_current_case(self):
+        self.current_case_start = None
+
+    def add_done_row(self, idx: int, case_name: str, returncode: int, elapsed_secs: int, warnings: int, errors: int):
+        table = self.query_one("#done_table", DataTable)
+        if returncode == -2:
+            status = "MISSING"
+        elif returncode == -3:
+            status = "EXCEPTION"
+        elif returncode == 0:
+            status = "OK"
+        else:
+            status = f"FAIL({returncode})"
+        elapsed_str = "-" if elapsed_secs < 0 else str(datetime.timedelta(seconds=elapsed_secs))
+        table.add_row(str(idx + 1), case_name, status, elapsed_str, str(warnings), str(errors))
+
+    def update_summary(self, total: int, done: int, failures: int, errors: int, warnings: int):
+        self.query_one("#summary_label", Static).update(
+            f"Total: {total} | Done: {done} | Failed: {failures} | "
+            f"Errors: {errors} | Warnings: {warnings}"
+        )
+
+    # ---------- mount ----------
+
     def on_mount(self):
+        table = self.query_one("#done_table", DataTable)
+        table.add_columns("#", "Case", "Status", "Time", "W", "E")
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
+        self.set_interval(1.0, self._refresh_current_stats)
 
     # ---------- event handlers ----------
 
@@ -238,12 +277,11 @@ class BatchSimuApp(App):
             self.refresh_scene_list()
             self.log_line(f"Removed: {removed}", "info")
 
-    @on(Button.Pressed, "#clear_log_btn")
-    def on_clear_log(self):
+    def action_clear_log(self):
         self.query_one("#log_panel", RichLog).clear()
 
-    def action_clear_log(self):
-        self.on_clear_log()
+    def action_show_tab(self, tab_id: str):
+        self.switch_tab(tab_id)
 
     @on(Button.Pressed, "#start_btn")
     def on_start(self):
@@ -301,11 +339,8 @@ class BatchSimuApp(App):
 
         zip_output = self.query_one("#zip_switch", Switch).value
         remove_output = self.query_one("#remove_switch", Switch).value
-        post_raw = self.query_one("#task_select", Select).value
-        post_task = "" if post_raw == NONE_TASK else str(post_raw)
 
         self.simulator.set_omp_env(self.simulator.default_omp_threads if use_omp else None)
-        # Route simulator's info/warning/error messages into the log widget.
         self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
 
         try:
@@ -315,19 +350,22 @@ class BatchSimuApp(App):
             return
         self.log_line(f"Prepared batch exe: {self.batch_exe}", "info")
 
+        # Reset Done tab for the new batch
+        self.query_one("#done_table", DataTable).clear()
+        self.update_summary(len(self.scene_files), 0, 0, 0, 0)
+
         self.batch_running = True
         self.stop_requested = False
         self.process_holder = []
         self.query_one("#start_btn", Button).disabled = True
         self.query_one("#stop_btn", Button).disabled = False
         self.set_progress(0)
+        self.switch_tab("running")
 
-        self._run_batch_worker(
-            list(self.scene_files), mpi_ranks, zip_output, remove_output, post_task
-        )
+        self._run_batch_worker(list(self.scene_files), mpi_ranks, zip_output, remove_output)
 
     @work(thread=True, exclusive=True)
-    def _run_batch_worker(self, scene_files, mpi_ranks, zip_output, remove_output, post_task):
+    def _run_batch_worker(self, scene_files, mpi_ranks, zip_output, remove_output):
         sim = self.simulator
         total = len(scene_files)
         time_costs: list[int] = []
@@ -341,7 +379,6 @@ class BatchSimuApp(App):
             sim.tg.queue_message("#Batch Batch settings:")
             sim.tg.queue_message(f"Zip output: {'True' if zip_output else 'False'}")
             sim.tg.queue_message(f"Remove output: {'True' if remove_output else 'False'}")
-            sim.tg.queue_message(f"Sequential task: {post_task if post_task else 'None'}")
             sim.tg.queue_message(f"MPI: {f'{mpi_ranks} ranks' if mpi_ranks > 0 else 'disabled'}")
             sim.tg.queue_message(f"OMP threads: {os.environ.get('OMP_NUM_THREADS', 'system default')}")
             sim.tg.send_telegram_message_batch()
@@ -355,11 +392,14 @@ class BatchSimuApp(App):
                 case_names.append(case_name)
                 self.call_from_thread(self.set_status, f"Case {i+1}/{total}: {case_name}")
                 self.call_from_thread(self.set_progress, (i / total) * 100)
+                self.call_from_thread(self.start_current_case, case_name, i, total)
 
                 if not os.path.exists(file_path):
                     time_costs.append(-1)
                     total_failures += 1
                     sim.info(f"File '{file_path}' not found.", tag="Case")
+                    self.call_from_thread(self.add_done_row, i, case_name, -2, -1, 0, 0)
+                    self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                     continue
 
                 self.process_holder.clear()
@@ -376,6 +416,8 @@ class BatchSimuApp(App):
                     self.call_from_thread(self.log_line, f"Exception in case: {e}", "error")
                     time_costs.append(-1)
                     total_failures += 1
+                    self.call_from_thread(self.add_done_row, i, case_name, -3, -1, 0, 0)
+                    self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                     continue
 
                 total_warnings += result.warnings
@@ -389,11 +431,18 @@ class BatchSimuApp(App):
                             if zipped:
                                 sim.remove_case_output(case_name)
                             else:
-                                sim.info(f"Output removal cancelled for of case '{case_name}'", tag="Case")
+                                sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
                 else:
                     time_costs.append(-1)
                     total_failures += 1
 
+                self.call_from_thread(self.finish_current_case)
+                self.call_from_thread(
+                    self.add_done_row, i, case_name, result.returncode,
+                    result.elapsed if result.returncode == 0 else -1,
+                    result.warnings, result.errors,
+                )
+                self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                 self.call_from_thread(
                     self.set_status,
                     f"Done {i+1}/{total} | W: {total_warnings} E: {total_errors} F: {total_failures}",
@@ -401,14 +450,6 @@ class BatchSimuApp(App):
 
             self.call_from_thread(self.set_progress, 100)
             sim.send_batch_report(case_names, time_costs, total_failures, total_errors, total_warnings)
-
-            if not self.stop_requested and post_task:
-                err = sim.start_post_task(post_task)
-                if err:
-                    sim.info(err, tag="Batch")
-                else:
-                    sim.info(f"Sequential task '{post_task}' started.", tag="Batch")
-
             sim.info("All done", tag="Batch")
 
         finally:
@@ -417,6 +458,8 @@ class BatchSimuApp(App):
             self.batch_exe = None
             self.batch_running = False
             self.call_from_thread(self.reset_run_controls)
+            self.call_from_thread(self.finish_current_case)
+            self.call_from_thread(self.switch_tab, "done")
             self.call_from_thread(
                 self.set_status,
                 f"Idle | Total: {total} | W: {total_warnings} E: {total_errors} F: {total_failures}",

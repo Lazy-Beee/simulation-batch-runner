@@ -109,7 +109,6 @@ class Simulator:
         self.default_omp_threads = defaults.get("omp_threads", 24)
         self.default_mpi_ranks = defaults.get("mpi_ranks", 4)
 
-        self.sequential_tasks = config.get("sequential_tasks", {})
         self.tg = TelegramNotice(config.get("telegram", {}))
 
         # Frontend hook for info/warning/error lines. CLI keeps the default print;
@@ -188,8 +187,6 @@ class Simulator:
             process_holder.append(process)
 
         for line in process.stdout:
-            if on_line:
-                on_line(line, "raw")
             if "[step]" in line:
                 line_terms = line.split("]")[-1].split(", ")
                 line_processed = line_terms[1].strip() + ", " + line_terms[-1].strip()
@@ -197,18 +194,24 @@ class Simulator:
                     f"({index+1}/{total}) {line_processed}",
                     tag="Case",
                 )
+                if on_line:
+                    on_line(line, "step")
             elif "[ERROR]" in line:
                 error_text = line.split("[ERROR]")[-1].strip()
                 self.tg.queue_message(f"Error: {error_text}")
                 errors += 1
                 if on_line:
-                    on_line(error_text, "error")
+                    on_line(line, "error")
             elif "[WARNING]" in line:
                 warning_text = line.split("[WARNING]")[-1].strip()
                 self.tg.queue_message(f"Warning: {warning_text}")
                 warnings += 1
                 if on_line:
-                    on_line(warning_text, "warning")
+                    on_line(line, "warning")
+            else:
+                if on_line:
+                    on_line(line, "raw")
+
             if "Average time:" in line:
                 if not avg_started:
                     self.tg.queue_message("Average time: ")
@@ -246,18 +249,6 @@ class Simulator:
             self.info(f"Removed output of case '{case_name}'", tag="Case")
         except Exception as e:
             self.info(f"Error while deleting output of case '{case_name}': {e}", tag="Case")
-
-    def start_post_task(self, task_name: str) -> Optional[str]:
-        """Start a configured post-task. Returns None on success, error string otherwise."""
-        if not task_name:
-            return None
-        task_exe = self.sequential_tasks.get(task_name)
-        if not task_exe:
-            return f"Sequential task '{task_name}' not found in config."
-        if not os.path.isfile(task_exe):
-            return f"Sequential task '{task_name}' executable not found: {task_exe}"
-        subprocess.Popen([task_exe])
-        return None
 
     def send_batch_report(self, case_names, time_costs, total_failures, total_errors, total_warnings):
         self.tg.queue_message("#Batch Process summary:")

@@ -4,6 +4,8 @@ import os
 import time as _time
 import shlex
 import datetime
+from dataclasses import dataclass
+from typing import Optional
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -11,11 +13,22 @@ from textual.binding import Binding
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
     Header, Footer, Input, Label, Button, Switch,
-    Static, RichLog, ListView, ListItem, ProgressBar,
+    Static, RichLog, ProgressBar,
     TabbedContent, TabPane, DataTable,
 )
 
 from simulation import Simulator, load_config, profile_name, profile_supports_mpi, profile_step_marker
+
+
+@dataclass
+class SceneEntry:
+    """Snapshot of a queued case: exe + scene + per-case OMP/MPI/zip/remove settings."""
+    exe_path: str
+    scene_path: str
+    omp_threads: Optional[int]   # None = no OMP limit
+    mpi_ranks: int               # 0 = MPI disabled
+    zip_output: bool
+    remove_output: bool
 
 
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
@@ -28,6 +41,14 @@ def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
     return f"Type: {name}"
 
 
+def strip_quotes(s: str) -> str:
+    """Drag-and-drop on Windows Terminal often inserts quoted paths; strip outer quotes."""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
 class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
@@ -37,9 +58,15 @@ class BatchSimuApp(App):
 
     .row { width: 100%; height: 3; align: left middle; }
     Input { width: 1fr; }
-    .narrow { width: 10; }
+    .narrow { width: 8; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
+
+    /* Vertically center short widgets so they line up with Input/Button */
+    .row > Label, .row > Switch {
+        height: 3;
+        content-align: left middle;
+    }
 
     #sim_type_label, #status_label,
     #current_case_label, #current_step_label, #current_stats_label,
@@ -47,7 +74,7 @@ class BatchSimuApp(App):
         width: 100%;
     }
 
-    #scene_list { height: 8; border: tall $panel; }
+    #scene_queue { height: 10; border: tall $panel; }
     #log_panel { height: 1fr; border: solid $accent; }
     #done_table { height: 1fr; }
 
@@ -73,8 +100,9 @@ class BatchSimuApp(App):
         super().__init__()
         self.config = load_config()
         self.simulator = Simulator(self.config)
-        self.scene_files: list[str] = []
-        self.batch_exe: str | None = None
+        self.scene_entries: list[SceneEntry] = []
+        # exe_path -> prepared batch_exe copy. Reused across cases that share an exe.
+        self._prepared_exes: dict[str, str] = {}
         self.process_holder: list = []
         self.stop_requested = False
         self.batch_running = False
@@ -96,45 +124,45 @@ class BatchSimuApp(App):
                         yield Input(
                             value=self.simulator.default_exe,
                             id="exe_input",
-                            placeholder="path to simulator exe (matched against simulator_profiles in config)",
+                            placeholder="path to simulator exe (drag a file in or paste)",
                         )
                     yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
-                    with Horizontal(classes="row"):
-                        yield Switch(value=False, id="omp_switch")
-                        yield Label("OMP threads:")
-                        yield Input(
-                            value=str(self.simulator.default_omp_threads),
-                            id="omp_input",
-                            classes="narrow",
-                            type="integer",
-                        )
-                        yield Switch(value=False, id="mpi_switch")
-                        yield Label("MPI ranks:")
-                        yield Input(
-                            value=str(self.simulator.default_mpi_ranks),
-                            id="mpi_input",
-                            classes="narrow",
-                            type="integer",
-                        )
+
                     with Horizontal(classes="row"):
                         yield Label("Scene:")
                         yield Input(
                             id="add_file_input",
-                            placeholder="path (Enter to add; quote paths with spaces; multiple allowed)",
+                            placeholder="drag scene file(s) in or paste; Enter adds them with the settings below",
                         )
-                        yield Button("Add", id="add_btn", variant="primary")
-                        yield Button("Remove", id="remove_btn")
-                    yield ListView(id="scene_list")
+
                     with Horizontal(classes="row"):
+                        yield Switch(value=False, id="omp_switch")
+                        yield Label("OMP")
+                        yield Input(
+                            value=str(self.simulator.default_omp_threads),
+                            id="omp_input", classes="narrow", type="integer",
+                        )
+                        yield Switch(value=False, id="mpi_switch")
+                        yield Label("MPI")
+                        yield Input(
+                            value=str(self.simulator.default_mpi_ranks),
+                            id="mpi_input", classes="narrow", type="integer",
+                        )
                         yield Switch(value=True, id="zip_switch")
-                        yield Label("Zip output")
+                        yield Label("Zip")
                         yield Switch(value=True, id="remove_switch")
-                        yield Label("Remove after zip")
+                        yield Label("Remove")
+                        yield Button("Add", id="add_btn", variant="primary")
+                        yield Button("Remove selected", id="remove_btn")
+
+                    yield DataTable(id="scene_queue", zebra_stripes=True)
+
                     with Horizontal(classes="row"):
                         yield Button("START", id="start_btn", variant="success")
                         yield Button("STOP", id="stop_btn", variant="error", disabled=True)
                     yield Static("Idle", id="status_label")
                     yield ProgressBar(id="progress", total=100, show_eta=False)
+
             with TabPane("Running", id="running"):
                 with Vertical():
                     yield Static("No case running", id="current_case_label")
@@ -147,10 +175,12 @@ class BatchSimuApp(App):
                         wrap=False,
                         max_lines=10000,
                     )
+
             with TabPane("Done", id="done"):
                 with Vertical():
                     yield Static("No cases completed yet", id="summary_label")
                     yield DataTable(id="done_table", zebra_stripes=True)
+
         yield Footer()
 
     # ---------- helpers ----------
@@ -194,12 +224,38 @@ class BatchSimuApp(App):
     def set_progress(self, percent: float):
         self.query_one("#progress", ProgressBar).update(progress=percent)
 
-    def refresh_scene_list(self):
-        lst = self.query_one("#scene_list", ListView)
-        lst.clear()
-        for p in self.scene_files:
-            marker = "" if os.path.exists(p) else "  [MISSING]"
-            lst.append(ListItem(Label(f"{p}{marker}")))
+    @staticmethod
+    def _short(path: str) -> str:
+        return os.path.basename(path) if path else "(empty)"
+
+    @staticmethod
+    def _fmt_omp(threads: Optional[int]) -> str:
+        return str(threads) if threads is not None else "-"
+
+    @staticmethod
+    def _fmt_mpi(ranks: int) -> str:
+        return str(ranks) if ranks > 0 else "-"
+
+    @staticmethod
+    def _fmt_bool(flag: bool) -> str:
+        return "Y" if flag else "-"
+
+    def refresh_scene_queue(self):
+        table = self.query_one("#scene_queue", DataTable)
+        table.clear()
+        for i, e in enumerate(self.scene_entries):
+            scene_disp = self._short(e.scene_path)
+            if not os.path.exists(e.scene_path):
+                scene_disp += "  [MISSING]"
+            table.add_row(
+                str(i + 1),
+                self._short(e.exe_path),
+                scene_disp,
+                self._fmt_omp(e.omp_threads),
+                self._fmt_mpi(e.mpi_ranks),
+                self._fmt_bool(e.zip_output),
+                self._fmt_bool(e.remove_output),
+            )
 
     def reset_run_controls(self):
         self.query_one("#start_btn", Button).disabled = False
@@ -225,8 +281,6 @@ class BatchSimuApp(App):
                 mpi_switch.value = False
 
         if not supports:
-            # supports==False always forces MPI off, even when the profile
-            # didn't change (defensive in case profile_supports_mpi flipped).
             mpi_switch.value = False
         mpi_switch.disabled = not supports
         mpi_input.disabled = not supports
@@ -270,8 +324,10 @@ class BatchSimuApp(App):
     # ---------- mount ----------
 
     def on_mount(self):
-        table = self.query_one("#done_table", DataTable)
-        table.add_columns("#", "Case", "Status", "Time", "Warnings", "Errors")
+        queue = self.query_one("#scene_queue", DataTable)
+        queue.add_columns("#", "Exe", "Scene", "OMP", "MPI", "Zip", "Rmv")
+        done = self.query_one("#done_table", DataTable)
+        done.add_columns("#", "Case", "Status", "Time", "Warnings", "Errors")
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
 
@@ -289,6 +345,16 @@ class BatchSimuApp(App):
     def on_add_submit(self):
         self._add_from_input()
 
+    def _read_int(self, value: str, fallback: int) -> int:
+        v = value.strip()
+        if not v:
+            return fallback
+        try:
+            n = int(v)
+            return n if n >= 1 else fallback
+        except ValueError:
+            return fallback
+
     def _add_from_input(self):
         inp = self.query_one("#add_file_input", Input)
         text = inp.value.strip()
@@ -299,22 +365,51 @@ class BatchSimuApp(App):
         except ValueError as e:
             self.log_line(f"Error parsing input: {e}", "error")
             return
+
+        # Snapshot the current widget state for these new entries
+        exe_path = strip_quotes(self.query_one("#exe_input", Input).value)
+        use_omp = self.query_one("#omp_switch", Switch).value
+        omp = (
+            self._read_int(self.query_one("#omp_input", Input).value, self.simulator.default_omp_threads)
+            if use_omp else None
+        )
+        use_mpi = self.query_one("#mpi_switch", Switch).value
+        mpi = (
+            self._read_int(self.query_one("#mpi_input", Input).value, self.simulator.default_mpi_ranks)
+            if use_mpi else 0
+        )
+        # Profile may forbid MPI; force off in that case (defense in depth)
+        if not profile_supports_mpi(self.simulator.identify_profile(exe_path)):
+            mpi = 0
+        zip_out = self.query_one("#zip_switch", Switch).value
+        rm_out = self.query_one("#remove_switch", Switch).value
+
         for p in paths:
-            self.scene_files.append(p)
+            p = strip_quotes(p)
+            entry = SceneEntry(
+                exe_path=exe_path,
+                scene_path=p,
+                omp_threads=omp,
+                mpi_ranks=mpi,
+                zip_output=zip_out,
+                remove_output=rm_out,
+            )
+            self.scene_entries.append(entry)
             if not os.path.exists(p):
-                self.log_line(f"Warning: file not found: {p}", "warning")
-        self.refresh_scene_list()
+                self.log_line(f"Warning: scene file not found: {p}", "warning")
+
+        self.refresh_scene_queue()
         inp.value = ""
         inp.focus()
 
     @on(Button.Pressed, "#remove_btn")
     def on_remove(self):
-        lst = self.query_one("#scene_list", ListView)
-        idx = lst.index
-        if idx is not None and 0 <= idx < len(self.scene_files):
-            removed = self.scene_files.pop(idx)
-            self.refresh_scene_list()
-            self.log_line(f"Removed: {removed}", "info")
+        table = self.query_one("#scene_queue", DataTable)
+        idx = table.cursor_row
+        if idx is not None and 0 <= idx < len(self.scene_entries):
+            removed = self.scene_entries.pop(idx)
+            self.refresh_scene_queue()
+            self.log_line(f"Removed: {removed.scene_path}", "info")
 
     def action_clear_log(self):
         self.query_one("#log_panel", RichLog).clear()
@@ -349,79 +444,42 @@ class BatchSimuApp(App):
     # ---------- batch orchestration ----------
 
     def _launch_batch(self):
-        exe_input = self.query_one("#exe_input", Input).value.strip().replace('"', "")
-        exe_path = exe_input if exe_input and os.path.isfile(exe_input) else self.simulator.default_exe
-        if not os.path.isfile(exe_path):
-            self.log_line(f"Simulator exe not found: {exe_path}", "error")
-            return
-        if not self.scene_files:
-            self.log_line("No scene files added.", "error")
+        if not self.scene_entries:
+            self.log_line("No scene entries in the queue.", "error")
             return
 
-        use_omp = self.query_one("#omp_switch", Switch).value
-        omp_input = self.query_one("#omp_input", Input).value.strip()
-        if use_omp:
-            try:
-                omp_threads = int(omp_input) if omp_input else self.simulator.default_omp_threads
-                if omp_threads < 1:
-                    omp_threads = self.simulator.default_omp_threads
-            except ValueError:
-                omp_threads = self.simulator.default_omp_threads
-        else:
-            omp_threads = None
+        # Validate exes upfront (per unique exe)
+        unique_exes = []
+        for e in self.scene_entries:
+            if e.exe_path not in unique_exes:
+                unique_exes.append(e.exe_path)
+        missing = [x for x in unique_exes if not os.path.isfile(x)]
+        if missing:
+            for m in missing:
+                self.log_line(f"Simulator exe not found: {m}", "error")
+            return
 
-        use_mpi = self.query_one("#mpi_switch", Switch).value
-        mpi_input = self.query_one("#mpi_input", Input).value.strip()
-        if use_mpi:
-            try:
-                mpi_ranks = int(mpi_input) if mpi_input else self.simulator.default_mpi_ranks
-                if mpi_ranks < 1:
-                    mpi_ranks = self.simulator.default_mpi_ranks
-            except ValueError:
-                mpi_ranks = self.simulator.default_mpi_ranks
-        else:
-            mpi_ranks = 0
-
-        launch_profile = self.simulator.identify_profile(exe_path)
-        self.current_step_marker = profile_step_marker(launch_profile)
-        if not profile_supports_mpi(launch_profile) and mpi_ranks > 0:
-            self.log_line(
-                f"{profile_name(launch_profile)} does not support MPI - forcing single-process.",
-                "warning",
-            )
-            mpi_ranks = 0
-
-        zip_output = self.query_one("#zip_switch", Switch).value
-        remove_output = self.query_one("#remove_switch", Switch).value
-
-        self.simulator.set_omp_env(omp_threads)
         self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
-
-        try:
-            self.batch_exe = self.simulator.prepare_exe(exe_path)
-        except Exception as e:
-            self.log_line(f"Failed to prepare exe: {e}", "error")
-            return
-        self.log_line(f"Prepared batch exe: {self.batch_exe}", "info")
 
         # Reset Done tab for the new batch
         self.query_one("#done_table", DataTable).clear()
-        self.update_summary(len(self.scene_files), 0, 0, 0, 0)
+        self.update_summary(len(self.scene_entries), 0, 0, 0, 0)
 
         self.batch_running = True
         self.stop_requested = False
         self.process_holder = []
+        self._prepared_exes = {}
         self.query_one("#start_btn", Button).disabled = True
         self.query_one("#stop_btn", Button).disabled = False
         self.set_progress(0)
         self.switch_tab("running")
 
-        self._run_batch_worker(list(self.scene_files), mpi_ranks, zip_output, remove_output)
+        self._run_batch_worker(list(self.scene_entries))
 
     @work(thread=True, exclusive=True)
-    def _run_batch_worker(self, scene_files, mpi_ranks, zip_output, remove_output):
+    def _run_batch_worker(self, entries: list[SceneEntry]):
         sim = self.simulator
-        total = len(scene_files)
+        total = len(entries)
         time_costs: list[int] = []
         case_names: list[str] = []
         total_warnings = 0
@@ -431,30 +489,47 @@ class BatchSimuApp(App):
         try:
             sim.info("Start processing", tag="Batch")
             sim.tg.queue_message("#Batch Batch settings:")
-            sim.tg.queue_message(f"Zip output: {'True' if zip_output else 'False'}")
-            sim.tg.queue_message(f"Remove output: {'True' if remove_output else 'False'}")
-            sim.tg.queue_message(f"MPI: {f'{mpi_ranks} ranks' if mpi_ranks > 0 else 'disabled'}")
-            sim.tg.queue_message(f"OMP threads: {os.environ.get('OMP_NUM_THREADS', 'system default')}")
+            sim.tg.queue_message(f"Total cases: {total}")
+            sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in entries})}")
             sim.tg.send_telegram_message_batch()
 
-            for i, file_path in enumerate(scene_files):
+            for i, entry in enumerate(entries):
                 if self.stop_requested:
                     self.call_from_thread(self.log_line, "--- Batch stopped by user ---", "warning")
                     break
 
-                case_name = sim.case_name_from_path(file_path)
+                case_name = sim.case_name_from_path(entry.scene_path)
                 case_names.append(case_name)
                 self.call_from_thread(self.set_status, f"Case {i+1}/{total}: {case_name}")
                 self.call_from_thread(self.set_progress, (i / total) * 100)
                 self.call_from_thread(self.start_current_case, case_name, i, total)
 
-                if not os.path.exists(file_path):
+                if not os.path.exists(entry.scene_path):
                     time_costs.append(-1)
                     total_failures += 1
-                    sim.info(f"File '{file_path}' not found.", tag="Case")
+                    sim.info(f"File '{entry.scene_path}' not found.", tag="Case")
                     self.call_from_thread(self.add_done_row, i, case_name, -2, -1, 0, 0)
                     self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                     continue
+
+                # Per-case OMP env (None unsets)
+                sim.set_omp_env(entry.omp_threads)
+
+                # Per-case prepared exe (cached per source exe path)
+                if entry.exe_path not in self._prepared_exes:
+                    try:
+                        self._prepared_exes[entry.exe_path] = sim.prepare_exe(entry.exe_path)
+                    except Exception as e:
+                        self.call_from_thread(self.log_line, f"Failed to prepare exe: {e}", "error")
+                        time_costs.append(-1)
+                        total_failures += 1
+                        self.call_from_thread(self.add_done_row, i, case_name, -3, -1, 0, 0)
+                        self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
+                        continue
+                batch_exe = self._prepared_exes[entry.exe_path]
+
+                # Update step_marker for the current case's exe
+                self.current_step_marker = profile_step_marker(sim.identify_profile(entry.exe_path))
 
                 self.process_holder.clear()
 
@@ -463,7 +538,7 @@ class BatchSimuApp(App):
 
                 try:
                     result = sim.run_case(
-                        self.batch_exe, file_path, i, total, mpi_ranks,
+                        batch_exe, entry.scene_path, i, total, entry.mpi_ranks,
                         on_line=on_line, process_holder=self.process_holder,
                     )
                 except Exception as e:
@@ -479,7 +554,7 @@ class BatchSimuApp(App):
 
                 if result.returncode == 0:
                     time_costs.append(result.elapsed)
-                    if zip_output:
+                    if entry.zip_output:
                         if not result.output_folder:
                             sim.info(
                                 f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
@@ -487,7 +562,7 @@ class BatchSimuApp(App):
                             )
                         else:
                             zipped = sim.zip_case_output(case_name, result.output_folder)
-                            if remove_output:
+                            if entry.remove_output:
                                 if zipped:
                                     sim.remove_case_output(case_name, result.output_folder)
                                 else:
@@ -514,9 +589,10 @@ class BatchSimuApp(App):
             sim.info("All done", tag="Batch")
 
         finally:
-            if self.batch_exe and sim.cleanup_exe(self.batch_exe):
-                self.call_from_thread(self.log_line, f"Cleaned up: {self.batch_exe}", "info")
-            self.batch_exe = None
+            for batch_exe in list(self._prepared_exes.values()):
+                if sim.cleanup_exe(batch_exe):
+                    self.call_from_thread(self.log_line, f"Cleaned up: {batch_exe}", "info")
+            self._prepared_exes = {}
             self.batch_running = False
             self.call_from_thread(self.reset_run_controls)
             self.call_from_thread(self.finish_current_case)
@@ -528,9 +604,9 @@ class BatchSimuApp(App):
             )
 
     def on_unmount(self):
-        if self.batch_exe:
+        for batch_exe in list(self._prepared_exes.values()):
             try:
-                self.simulator.cleanup_exe(self.batch_exe)
+                self.simulator.cleanup_exe(batch_exe)
             except Exception:
                 pass
 

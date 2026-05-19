@@ -1,4 +1,4 @@
-"""Textual TUI frontend for batch simulation - 3-tab layout."""
+"""Textual TUI frontend for batch simulation - 2-tab layout (Setup + Running)."""
 
 import os
 import time as _time
@@ -30,6 +30,10 @@ STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_MISSING = "missing"   # scene file didn't exist when we tried to run it
 STATUS_ERROR = "error"       # exception during run
+STATUS_STOPPED = "stopped"   # process was force-stopped mid-run
+
+# Statuses that are removable from the queue (anything not currently in flight).
+REMOVABLE_STATUSES = {STATUS_PENDING, STATUS_STOPPED}
 
 ROW_STYLE_BY_STATUS = {
     STATUS_PENDING: "",
@@ -38,34 +42,38 @@ ROW_STYLE_BY_STATUS = {
     STATUS_FAILED: "on red3",
     STATUS_MISSING: "on red3",
     STATUS_ERROR: "on red3",
+    STATUS_STOPPED: "on grey35",
 }
 
-# Fixed widths for the Setup scene_queue. Padding cell content to these widths
-# (with the row-style applied) is what fills the entire row's background with
-# the status colour - DataTable's own column padding ignores cell text styles.
+# Single Setup queue table now also carries result columns (formerly the Done tab).
 QUEUE_COLS = [
     ("#", 4),
     ("Exe", 22),
-    ("Scene", 30),
+    ("Scene", 26),
     ("OMP", 5),
     ("MPI", 5),
     ("Zip", 5),
     ("Rmv", 5),
-]
-
-DONE_COLS = [
-    ("#", 4),
-    ("Exe", 22),
-    ("Case", 24),
-    ("OMP", 5),
-    ("MPI", 5),
-    ("Zip", 5),
-    ("Rmv", 5),
-    ("Status", 12),
+    ("Status", 10),
     ("Time", 10),
     ("Warnings", 9),
     ("Errors", 7),
 ]
+
+
+def status_display(entry) -> str:
+    s = entry.status
+    if s == STATUS_DONE:
+        return "OK"
+    if s == STATUS_FAILED:
+        return f"FAIL({entry.returncode})" if entry.returncode is not None else "FAIL"
+    if s == STATUS_MISSING:
+        return "MISSING"
+    if s == STATUS_ERROR:
+        return "EXCEPTION"
+    if s == STATUS_STOPPED:
+        return "STOPPED"
+    return s  # pending / running
 
 
 def styled_cell(value, width: int, style: str) -> Text:
@@ -162,7 +170,6 @@ class BatchSimuApp(App):
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("f1", "show_tab('setup')", "Setup"),
         Binding("f2", "show_tab('running')", "Running"),
-        Binding("f3", "show_tab('done')", "Done"),
     ]
 
     def __init__(self):
@@ -174,6 +181,8 @@ class BatchSimuApp(App):
         self._prepared_exes: dict[str, str] = {}
         self.process_holder: list = []
         self.stop_requested = False
+        self.force_stopped_current = False   # set by FORCE STOP; consumed by worker
+        self.current_entry: Optional[SceneEntry] = None
         self.batch_running = False
         self.current_case_start: float | None = None
         self.current_warnings = 0
@@ -228,11 +237,13 @@ class BatchSimuApp(App):
                         yield Button("Down", id="down_btn")
                         yield Button("Remove selected", id="remove_btn")
 
-                    yield DataTable(id="scene_queue", zebra_stripes=True)
+                    yield DataTable(id="scene_queue", zebra_stripes=True, cell_padding=0)
 
                     with Horizontal(classes="row"):
                         yield Button("START", id="start_btn", variant="success")
                         yield Button("STOP", id="stop_btn", variant="error", disabled=True)
+                        yield Button("FORCE STOP", id="force_stop_btn", variant="error", disabled=True)
+                        yield Button("RESUME", id="resume_btn", variant="primary")
                         yield Static("", id="bottom_filler")
                         yield Button("Reset", id="reset_btn", variant="warning")
                     yield Static("Idle", id="status_label")
@@ -250,11 +261,6 @@ class BatchSimuApp(App):
                         wrap=False,
                         max_lines=10000,
                     )
-
-            with TabPane("Done", id="done"):
-                with Vertical():
-                    yield Static("No cases completed yet", id="summary_label")
-                    yield DataTable(id="done_table", zebra_stripes=True)
 
         yield Footer()
 
@@ -315,6 +321,12 @@ class BatchSimuApp(App):
     def _fmt_bool(flag: bool) -> str:
         return "Y" if flag else "-"
 
+    @staticmethod
+    def _fmt_time(elapsed: Optional[int]) -> str:
+        if elapsed is None or elapsed < 0:
+            return "-"
+        return str(datetime.timedelta(seconds=elapsed))
+
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
         prev = table.cursor_row if table.row_count else None
@@ -333,6 +345,10 @@ class BatchSimuApp(App):
                 self._fmt_mpi(e.mpi_ranks),
                 self._fmt_bool(e.zip_output),
                 self._fmt_bool(e.remove_output),
+                status_display(e),
+                self._fmt_time(e.elapsed),
+                str(e.warnings),
+                str(e.errors),
             ]
             table.add_row(*(styled_cell(v, w, sty) for v, w in zip(values, widths)))
         if prev is not None and 0 <= prev < table.row_count:
@@ -341,6 +357,9 @@ class BatchSimuApp(App):
     def reset_run_controls(self):
         self.query_one("#start_btn", Button).disabled = False
         self.query_one("#stop_btn", Button).disabled = True
+        self.query_one("#force_stop_btn", Button).disabled = True
+        self.query_one("#resume_btn", Button).disabled = False
+        self.query_one("#reset_btn", Button).disabled = False
 
     def apply_sim_type(self, exe_path: str):
         profile = self.simulator.identify_profile(exe_path)
@@ -383,34 +402,10 @@ class BatchSimuApp(App):
     def finish_current_case(self):
         self.current_case_start = None
 
-    def add_done_row(self, idx: int, entry: SceneEntry, status_text: str):
-        table = self.query_one("#done_table", DataTable)
-        elapsed_str = "-" if entry.elapsed is None or entry.elapsed < 0 else str(datetime.timedelta(seconds=entry.elapsed))
-        case_name = self.simulator.case_name_from_path(entry.scene_path)
-        # Use the same status-to-row-style mapping so the Done table is
-        # consistent with the Setup queue.
-        sty = ROW_STYLE_BY_STATUS.get(entry.status, "")
-        widths = [w for _, w in DONE_COLS]
-        values = [
-            str(idx + 1),
-            self._short(entry.exe_path),
-            case_name,
-            self._fmt_omp(entry.omp_threads),
-            self._fmt_mpi(entry.mpi_ranks),
-            self._fmt_bool(entry.zip_output),
-            self._fmt_bool(entry.remove_output),
-            status_text,
-            elapsed_str,
-            str(entry.warnings),
-            str(entry.errors),
-        ]
-        table.add_row(*(styled_cell(v, w, sty) for v, w in zip(values, widths)))
-
-    def update_summary(self, total: int, done: int, failures: int, errors: int, warnings: int):
-        self.query_one("#summary_label", Static).update(
-            f"Total: {total} | Done: {done} | Failed: {failures} | "
-            f"Errors: {errors} | Warnings: {warnings}"
-        )
+    # add_done_row / update_summary were removed when the Done tab was merged
+    # into the Setup queue. Per-case results now live as columns on each row
+    # of the Setup scene_queue table and refresh as the worker mutates the
+    # SceneEntry fields.
 
     # ---------- mount ----------
 
@@ -418,9 +413,6 @@ class BatchSimuApp(App):
         queue = self.query_one("#scene_queue", DataTable)
         for label, width in QUEUE_COLS:
             queue.add_column(label, width=width)
-        done = self.query_one("#done_table", DataTable)
-        for label, width in DONE_COLS:
-            done.add_column(label, width=width)
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
 
@@ -502,9 +494,9 @@ class BatchSimuApp(App):
         if idx is None or not (0 <= idx < len(self.scene_entries)):
             return
         target = self.scene_entries[idx]
-        if target.status != STATUS_PENDING:
+        if target.status not in REMOVABLE_STATUSES:
             self.log_line(
-                f"Cannot remove '{target.scene_path}': already {target.status}.",
+                f"Cannot remove '{target.scene_path}': {status_display(target)} cases stay as a record.",
                 "warning",
             )
             return
@@ -560,11 +552,9 @@ class BatchSimuApp(App):
             except Exception:
                 pass
         self._prepared_exes = {}
-        # Wipe queues and counters
+        # Wipe queue
         self.scene_entries.clear()
         self.refresh_scene_queue()
-        self.query_one("#done_table", DataTable).clear()
-        self.update_summary(0, 0, 0, 0, 0)
         self.set_status("Idle")
         self.set_progress(0)
         self.query_one("#log_panel", RichLog).clear()
@@ -573,6 +563,9 @@ class BatchSimuApp(App):
         self.query_one("#add_file_input", Input).value = ""
         self.current_step_marker = None
         self._last_profile_name = None
+        self.stop_requested = False
+        self.force_stopped_current = False
+        self.current_entry = None
         self.apply_sim_type(self.simulator.default_exe)
         # Reset run-time stats
         self.current_warnings = 0
@@ -581,6 +574,7 @@ class BatchSimuApp(App):
         self.query_one("#current_case_label", Static).update("No case running")
         self.query_one("#current_step_label", Static).update("Step: -")
         self.query_one("#current_stats_label", Static).update("Elapsed: - | Warnings: 0 | Errors: 0")
+        self.reset_run_controls()
         self.switch_tab("setup")
 
     def on_paste(self, event: events.Paste):
@@ -622,18 +616,38 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#stop_btn")
     def on_stop(self):
+        """Graceful stop: let the current case finish naturally, then exit
+        the batch. Pending cases remain pending so RESUME can pick up."""
         if not self.batch_running:
             return
         self.stop_requested = True
+        self.log_line("--- Stop requested: current case will finish then batch exits ---", "warning")
+
+    def action_stop(self):
+        self.on_stop()
+
+    @on(Button.Pressed, "#force_stop_btn")
+    def on_force_stop(self):
+        """Immediate stop: terminate the running subprocess. The current
+        entry is marked STOPPED (removable) instead of FAILED."""
+        if not self.batch_running:
+            return
+        self.stop_requested = True
+        self.force_stopped_current = True
         for proc in self.process_holder:
             try:
                 proc.terminate()
             except Exception:
                 pass
-        self.log_line("--- Stop requested ---", "warning")
+        self.log_line("--- Force stop: terminating current case ---", "warning")
 
-    def action_stop(self):
-        self.on_stop()
+    @on(Button.Pressed, "#resume_btn")
+    def on_resume(self):
+        """Resume the batch: process any entries still in PENDING status."""
+        if self.batch_running:
+            return
+        # If everything has been run already, _launch_batch will warn.
+        self._launch_batch()
 
     # ---------- batch orchestration ----------
 
@@ -641,10 +655,15 @@ class BatchSimuApp(App):
         if not self.scene_entries:
             self.log_line("No scene entries in the queue.", "error")
             return
+        # Only entries still pending will be processed; skip everything else.
+        pending = [e for e in self.scene_entries if e.status == STATUS_PENDING]
+        if not pending:
+            self.log_line("No pending entries to run.", "warning")
+            return
 
-        # Validate exes upfront (per unique exe)
+        # Validate exes for pending entries
         unique_exes = []
-        for e in self.scene_entries:
+        for e in pending:
             if e.exe_path not in unique_exes:
                 unique_exes.append(e.exe_path)
         missing = [x for x in unique_exes if not os.path.isfile(x)]
@@ -655,19 +674,20 @@ class BatchSimuApp(App):
 
         self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
 
-        # Reset Done tab for the new batch
-        self.query_one("#done_table", DataTable).clear()
-        self.update_summary(len(self.scene_entries), 0, 0, 0, 0)
-
         self.batch_running = True
         self.stop_requested = False
+        self.force_stopped_current = False
         self.process_holder = []
-        self._prepared_exes = {}
         self.query_one("#start_btn", Button).disabled = True
+        self.query_one("#resume_btn", Button).disabled = True
         self.query_one("#stop_btn", Button).disabled = False
+        self.query_one("#force_stop_btn", Button).disabled = False
+        self.query_one("#reset_btn", Button).disabled = True
         self.set_progress(0)
         self.switch_tab("running")
 
+        # Pass the FULL entry list so per-entry indices in status messages
+        # reflect their queue position; worker skips non-pending internally.
         self._run_batch_worker(list(self.scene_entries))
 
     def _mark_status(self, entry: SceneEntry, status: str):
@@ -687,21 +707,27 @@ class BatchSimuApp(App):
         total_warnings = 0
         total_errors = 0
         total_failures = 0
+        # Count only what we'll actually run, for the Telegram digest.
+        runnable = sum(1 for e in entries if e.status == STATUS_PENDING)
 
         try:
             sim.info("Start processing", tag="Batch")
             sim.tg.queue_message("#Batch Batch settings:")
-            sim.tg.queue_message(f"Total cases: {total}")
-            sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in entries})}")
+            sim.tg.queue_message(f"Pending cases to run: {runnable} / {total}")
+            sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in entries if e.status == STATUS_PENDING})}")
             sim.tg.send_telegram_message_batch()
 
             for i, entry in enumerate(entries):
                 if self.stop_requested:
                     self.call_from_thread(self.log_line, "--- Batch stopped by user ---", "warning")
                     break
+                # Resume support: skip anything that's already been processed.
+                if entry.status != STATUS_PENDING:
+                    continue
 
                 case_name = sim.case_name_from_path(entry.scene_path)
                 case_names.append(case_name)
+                self.current_entry = entry
                 self.call_from_thread(self.set_status, f"Case {i+1}/{total}: {case_name}")
                 self.call_from_thread(self.set_progress, (i / total) * 100)
                 self.call_from_thread(self.start_current_case, case_name, i, total)
@@ -712,9 +738,8 @@ class BatchSimuApp(App):
                     total_failures += 1
                     sim.info(f"File '{entry.scene_path}' not found.", tag="Case")
                     self.call_from_thread(self._mark_status, entry, STATUS_MISSING)
-                    self.call_from_thread(self.add_done_row, i, entry, "MISSING")
-                    self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                     time_costs.append(-1)
+                    self.current_entry = None
                     continue
 
                 # Per-case OMP env (None unsets)
@@ -729,9 +754,8 @@ class BatchSimuApp(App):
                         entry.elapsed = -1
                         total_failures += 1
                         self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
-                        self.call_from_thread(self.add_done_row, i, entry, "EXCEPTION")
-                        self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                         time_costs.append(-1)
+                        self.current_entry = None
                         continue
                 batch_exe = self._prepared_exes[entry.exe_path]
 
@@ -753,9 +777,8 @@ class BatchSimuApp(App):
                     entry.elapsed = -1
                     total_failures += 1
                     self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
-                    self.call_from_thread(self.add_done_row, i, entry, "EXCEPTION")
-                    self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                     time_costs.append(-1)
+                    self.current_entry = None
                     continue
 
                 entry.returncode = result.returncode
@@ -763,6 +786,17 @@ class BatchSimuApp(App):
                 entry.errors = result.errors
                 total_warnings += result.warnings
                 total_errors += result.errors
+
+                if self.force_stopped_current:
+                    # Force-stop terminated the subprocess; categorise as STOPPED
+                    # (removable) instead of FAILED so the user can clean it up.
+                    self.force_stopped_current = False
+                    entry.elapsed = -1
+                    time_costs.append(-1)
+                    self.call_from_thread(self.finish_current_case)
+                    self.call_from_thread(self._mark_status, entry, STATUS_STOPPED)
+                    self.current_entry = None
+                    continue
 
                 if result.returncode == 0:
                     entry.elapsed = result.elapsed
@@ -781,23 +815,20 @@ class BatchSimuApp(App):
                                 else:
                                     sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
                     final_status = STATUS_DONE
-                    status_text = "OK"
                 else:
                     entry.elapsed = -1
                     total_failures += 1
                     time_costs.append(-1)
                     final_status = STATUS_FAILED
-                    status_text = f"FAIL({result.returncode})"
 
                 self.call_from_thread(self.finish_current_case)
                 self.call_from_thread(self._mark_status, entry, final_status)
-                self.call_from_thread(self.add_done_row, i, entry, status_text)
-                self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                 self.call_from_thread(
                     self.set_status,
                     f"Done {i+1}/{total} | "
                     f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
                 )
+                self.current_entry = None
 
             self.call_from_thread(self.set_progress, 100)
             sim.send_batch_report(case_names, time_costs, total_failures, total_errors, total_warnings)
@@ -809,12 +840,13 @@ class BatchSimuApp(App):
                     self.call_from_thread(self.log_line, f"Cleaned up: {batch_exe}", "info")
             self._prepared_exes = {}
             self.batch_running = False
+            self.current_entry = None
             self.call_from_thread(self.reset_run_controls)
             self.call_from_thread(self.finish_current_case)
-            self.call_from_thread(self.switch_tab, "done")
+            self.call_from_thread(self.switch_tab, "setup")
             self.call_from_thread(
                 self.set_status,
-                f"Idle | Total: {total} | "
+                f"Idle | "
                 f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
             )
 

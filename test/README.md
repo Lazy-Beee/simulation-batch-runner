@@ -33,8 +33,8 @@ The two replay scenes point at `SPlisHSPlasH.txt` and `CAMMP.log` next to them. 
    test\scene_clean.json test\scene_warnings.json test\scene_errors.json
    ```
 4. Hit **START** (or `Ctrl+S`) — the app auto-jumps to the **Running** tab. Watch the live log, the current step indicator, and the per-case warning/error counter.
-5. When the batch finishes it auto-switches to the **Done** tab, which has one row per case.
-6. `F1` / `F2` / `F3` jump between tabs at any time.
+5. When the batch finishes it auto-switches back to **Setup**, where the queue table now shows status / time / warnings / errors per row.
+6. `F1` / `F2` jump between Setup and Running at any time. Select a finished row in the queue and click **View log** to pop its captured log into its own tab; `Ctrl+W` closes the current case tab.
 
 ## Scenes
 

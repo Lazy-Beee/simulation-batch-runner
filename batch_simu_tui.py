@@ -500,11 +500,6 @@ class BatchSimuApp(App):
     def finish_current_case(self):
         self.current_case_start = None
 
-    # add_done_row / update_summary were removed when the Done tab was merged
-    # into the Setup queue. Per-case results now live as columns on each row
-    # of the Setup scene_queue table and refresh as the worker mutates the
-    # SceneEntry fields.
-
     # ---------- mount ----------
 
     def on_mount(self):

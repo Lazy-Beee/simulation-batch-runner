@@ -1,13 +1,13 @@
 # Batch Simulation
 
-Sequential batch runner for CLI simulators invoked as `<exe> --scene-file <path>`. Iterates through a list of scene files, runs each one, and produces a per-case + batch summary. Supports OpenMP thread limiting, MPI launch (per simulator profile), output compression with 7-Zip, and Telegram progress notifications.
+Sequential batch runner for CLI simulators invoked as `<exe> --scene-file <path>`. Iterates through a queue of scene files, runs each one, and tracks per-case results. Supports OpenMP thread limiting, MPI launch (per simulator profile), output compression with 7-Zip, and Telegram progress notifications.
 
-Simulator-specific behavior (display name, MPI capability, step-line marker) is fully data-driven via the `simulator_profiles` array in `config.json`. The matching profile is picked by case-insensitive substring match on the exe path. Out of the box, the template ships with profiles for `SPlisHSPlasH` and `CAMMP`; add more for any other CLI simulator that follows the same `--scene-file` / `[ERROR]` / `[WARNING]` / `Output directory:` conventions.
+Simulator-specific behavior (display name, MPI capability, step-line marker, default switch state) is fully data-driven via the `simulator_profiles` array in `config.json`. The matching profile is picked by case-insensitive substring match on the exe path. The template ships profiles for `SPlisHSPlasH` and `CAMMP`; add more for any other CLI simulator that follows the same `--scene-file` / `[ERROR]` / `[WARNING]` / `Output directory:` conventions.
 
 Two frontends share the same core (`simulation.py`):
 
-- **CLI** (`batch_simu.py`) — interactive prompts, suitable for SSH / minimal envs.
-- **TUI** (`batch_simu_tui.py`) — [Textual](https://textual.textualize.io/) terminal UI with live log, progress bar, and Start/Stop controls.
+- **CLI** (`batch_simu.py`) — interactive prompts, suitable for SSH / minimal envs. One configuration is applied to every case in the prompt batch.
+- **TUI** (`batch_simu_tui.py`) — [Textual](https://textual.textualize.io/) terminal UI with **per-case** OMP / MPI / Zip / Remove settings, status-colored queue table, live log, CPU/Memory monitor, and per-case log tabs you can pop open on demand.
 
 ## Setup
 
@@ -16,15 +16,16 @@ Two frontends share the same core (`simulation.py`):
    Copy-Item config.example.json config.json
    ```
 2. Edit `config.json` for your machine:
-   - `simulator.default_exe` — exe path used when the user leaves the input blank
+   - `simulator.default_exe` — exe path used when the Simulator input is blank
    - `simulator.zip_path` — path to `7z.exe`
-   - `simulator_profiles[]` — one entry per simulator family. Each entry has:
-     - `name` — display label (shown in TUI Type line and CLI prompt)
+   - `defaults.omp_threads` / `defaults.mpi_ranks` — fallback values used when a switch is on but its numeric input is blank
+   - `simulator_profiles[]` — one entry per simulator family:
+     - `name` — display label
      - `path_marker` — case-insensitive substring matched against the exe path
      - `supports_mpi` — `false` disables MPI controls and skips the MPI prompt
-     - `step_marker` — substring that identifies a step/progress line in stdout; used to drive the Running tab's step indicator and Telegram per-step messages
-     - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; only re-applied when the matched profile transitions, so a manual toggle won't be clobbered by typing in the exe field
-   - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` if you want notifications
+     - `step_marker` — substring identifying a step / progress line in stdout (drives the Running tab's step indicator and per-step Telegram messages)
+     - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; re-applied only when the matched profile *transitions*
+   - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` for notifications
 
    The per-case output folder is auto-detected from the simulator's log (`Output directory:` line, quoted or unquoted). If the line isn't seen, zip and remove are skipped for that case.
 3. Install dependencies:
@@ -40,23 +41,68 @@ Two frontends share the same core (`simulation.py`):
 python batch_simu_tui.py
 ```
 
-Three-tab layout:
+### Top bar
 
-- **Setup** — simulator path, OMP/MPI options, scene queue, zip/remove switches, Start/Stop, overall progress
-- **Running** — currently executing case header, latest `[step]` line, elapsed time / warnings / errors counters, live log
-- **Done** — per-case results table (case, status, time, warnings, errors) and batch summary
+A single line at the top:
 
-Auto-switches to **Running** on Start and to **Done** when the batch finishes.
+```
+[Batch Simulation]                       CPU 12.3% | MEM 12.3 GB / 32.0 GB    13:42:08
+```
 
-Key bindings:
+Clock and stats refresh every second. CPU/Memory require `psutil` — without it the right side shows a `(install psutil for CPU/MEM)` hint instead.
+
+### Two tabs
+
+- **Setup** — primary workspace: simulator + scene inputs, settings row, queue table, run controls, status line, progress bar.
+- **Running** — current case header (`Case N/M: name`), latest step line, live elapsed / warnings / errors, streaming RichLog.
+
+Additionally, **per-case log tabs** can be popped open from the Setup queue (see *View log*) and closed individually. Setup and Running are pinned and can't be closed.
+
+### Setup workflow
+
+1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable.
+2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue.
+3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch. These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
+4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items.
+5. **Queue table** — 11 columns: `# / Exe / Scene / OMP / MPI / Zip / Rmv / Status / Time / Warnings / Errors`. Each row's background reflects its status:
+
+   | Background | Status |
+   |---|---|
+   | (default) | pending |
+   | yellow | running |
+   | dark green | done |
+   | red | failed / missing / error |
+   | grey | stopped (force-stopped) |
+
+6. **Row actions** — with a row selected (cursor on it):
+   - **Up / Down** — reorder pending entries. Running / finished rows are locked in place; pending rows can't jump over a non-pending neighbour.
+   - **View log** — opens (or switches to) a new tab replaying that case's captured log. Only available for finished cases (done / failed / stopped / missing / error); pending / running rows are rejected with a hint.
+   - **Remove selected** — drops the row. Allowed for pending and stopped only; done / failed / etc. stay as a record.
+7. **Run controls** — bottom row:
+   - **START** — resets every non-pending entry back to pending (clearing previous `Time` / `Warnings` / `Errors`) and runs the whole queue.
+   - **STOP** — graceful: the current case finishes naturally, then the batch exits. Remaining pending cases stay pending.
+   - **FORCE STOP** — kills the current process tree (`taskkill /F /T` on Windows). The in-flight entry is marked `stopped` (removable).
+   - **RESUME** — re-queues `stopped` entries as pending and runs all pending. Done / failed / missing / error rows stay as a record.
+   - **Reset** (bottom-right) — wipes the queue, log, progress, prepared exe copies, and closes any open case tabs. Disabled while a batch is running.
+
+### Drag-and-drop
+
+Drag a file from your file manager onto the terminal:
+- if the **Simulator** input has focus, it replaces that path;
+- otherwise the path lands in the **Scene** input, ready to Enter.
+
+Quoted-with-spaces paths from Windows Terminal are stripped automatically.
+
+### Key bindings
 
 | Key | Action |
 |---|---|
-| `Ctrl+S` | Start batch |
-| `Ctrl+X` | Stop current case (terminates the subprocess, ends the batch) |
+| `Ctrl+S` | START |
+| `Ctrl+X` | STOP (graceful) |
 | `Ctrl+L` | Clear log |
+| `Ctrl+W` | Close current case tab (Setup / Running are pinned) |
 | `Ctrl+Q` | Quit |
-| `F1` / `F2` / `F3` | Jump to Setup / Running / Done tab |
+| `F1` / `F2` | Jump to Setup / Running |
 
 ## Usage — CLI
 
@@ -64,11 +110,11 @@ Key bindings:
 python batch_simu.py [--no-zip] [--keep-output]
 ```
 
-The script will prompt for:
-- `Simulator exe`: path to the simulator exe (blank = use `default_exe` from config)
-- `Limit OMP_NUM_THREADS`: if yes, asks for thread count (Enter accepts the configured default)
-- `Launch with MPI`: if yes, asks for rank count and uses `mpiexec -n N` (skipped when the matched profile has `supports_mpi: false`)
-- `Add scene file`: paste one or more scene paths (quote paths with spaces); empty line to finish
+The script prompts for:
+- **Simulator exe** — path to the simulator exe (blank = use `default_exe` from config)
+- **Limit OMP_NUM_THREADS** — if yes, asks for thread count (Enter = configured default)
+- **Launch with MPI** — if yes, asks for rank count and uses `mpiexec -n N` (skipped when the matched profile has `supports_mpi: false`)
+- **Add scene file** — paste one or more scene paths (quote paths with spaces); empty line to finish
 
 ### Flags
 
@@ -77,16 +123,24 @@ The script will prompt for:
 | `--no-zip` | Each case's output folder is compressed with 7-Zip | Skip compression |
 | `--keep-output` | Original output folder is deleted after successful compression | Keep the uncompressed folder |
 
+The CLI applies one configuration to every case in the prompt batch. For per-case configuration, use the TUI.
+
 ## How it works
 
-- The chosen simulator exe is copied to `*.batch.exe` before running, so you can rebuild the original while a batch is in progress. The copy is deleted on exit.
-- `stdout` is streamed live and parsed for `[step]`, `[ERROR]`, `[WARNING]`, and `Average time:` lines.
-- A failed case (non-zero exit code or missing file) is reported and the batch continues with the next file.
+- The chosen simulator exe is copied to `<base>.batch<ext>` per unique source path (cached across cases that share an exe), so you can rebuild the original while a batch is in progress. Every copy is cleaned up at batch exit.
+- `stdout` is streamed live and parsed for the matched profile's `step_marker`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
+- A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
+- Telegram digest at batch end summarises per-case time costs and totals.
 
 ## Requirements
 
 - Python 3.9+
-- `requests` (Telegram; the script still runs without notifications if `telegram.enabled` is `false`)
-- `textual>=0.50` (TUI only; CLI works without it)
-- 7-Zip (only if you want output compression)
-- `mpiexec` on PATH (only if you choose MPI)
+- `requests` — Telegram notifications
+- `textual>=0.50` — TUI only; CLI works without it
+- `psutil` — TUI TopBar CPU/MEM stats (optional; the TUI runs fine without)
+- 7-Zip — only if you want output compression
+- `mpiexec` on PATH — only if a profile sets `supports_mpi: true` and the user toggles MPI on
+
+## Testing
+
+`test/` ships a fake simulator and sample scenes for exercising both frontends without a real simulator build. See [test/README.md](test/README.md).

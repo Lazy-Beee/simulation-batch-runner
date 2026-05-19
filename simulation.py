@@ -30,6 +30,31 @@ class CaseResult(NamedTuple):
     elapsed: int
     warnings: int
     errors: int
+    output_folder: Optional[str]
+
+
+def extract_output_dir(line: str) -> Optional[str]:
+    """Pull the case output directory out of a log line.
+
+    Two payload formats are accepted after the 'Output directory:' marker:
+        - bare path, taken verbatim:   'Output directory: C:/forward/slashes/case'
+        - quoted path with backslashes JSON-escaped (\\\\ -> \\):
+                                       'Output directory: "C:\\\\back\\\\slashes\\\\case"'
+    Returns the resolved path, or None if the line doesn't contain the marker.
+    """
+    idx = line.find("Output directory:")
+    if idx < 0:
+        return None
+    rest = line[idx + len("Output directory:"):].strip()
+    if not rest:
+        return None
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end < 0:
+            return None
+        path = rest[1:end].replace("\\\\", "\\")
+        return path or None
+    return rest
 
 
 def detect_simulator_type(exe_path: str) -> str:
@@ -102,7 +127,6 @@ class Simulator:
     def __init__(self, config):
         sim = config.get("simulator", {})
         self.default_exe = sim.get("default_exe", "")
-        self.output_path = sim.get("output_path", "")
         self.zip_path = sim.get("zip_path", "")
 
         defaults = config.get("defaults", {})
@@ -174,6 +198,7 @@ class Simulator:
         start_time = time.time()
         warnings = 0
         errors = 0
+        output_folder: Optional[str] = None
 
         self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{total}):")
         self.info(
@@ -190,6 +215,11 @@ class Simulator:
             process_holder.append(process)
 
         for line in process.stdout:
+            if output_folder is None and "Output directory:" in line:
+                candidate = extract_output_dir(line)
+                if candidate:
+                    output_folder = candidate
+
             if "[step]" in line:
                 # SPHSimulator step line:
                 # [<ts>] Debug:   [LoggerPro][step] n: 100/..., t: ..., p: ..., dt_A: ..., ...
@@ -239,10 +269,9 @@ class Simulator:
             self.tg.send_telegram_message_batch()
             self.info(f"Error processing '{case_name}' (returncode {process.returncode})", tag="Case")
 
-        return CaseResult(process.returncode, elapsed, warnings, errors)
+        return CaseResult(process.returncode, elapsed, warnings, errors, output_folder)
 
-    def zip_case_output(self, case_name: str) -> bool:
-        output_folder = os.path.join(self.output_path, case_name)
+    def zip_case_output(self, case_name: str, output_folder: str) -> bool:
         zip_file = f"{output_folder}.zip"
         try:
             subprocess.run([self.zip_path, "a", zip_file, output_folder], check=True)
@@ -252,8 +281,7 @@ class Simulator:
             self.info(f"Error during compression output of case '{case_name}': {e}", tag="Case")
             return False
 
-    def remove_case_output(self, case_name: str):
-        output_folder = os.path.join(self.output_path, case_name)
+    def remove_case_output(self, case_name: str, output_folder: str):
         try:
             shutil.rmtree(output_folder)
             self.info(f"Removed output of case '{case_name}'", tag="Case")

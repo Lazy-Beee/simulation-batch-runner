@@ -17,9 +17,10 @@ Two frontends share the same core (`simulation.py`):
    ```
 2. Edit `config.json` for your machine:
    - `simulator.default_exe` — default exe path (SPHSimulator or CAMMP); used when the user input is blank
-   - `simulator.output_path` — where the simulator writes case folders
    - `simulator.zip_path` — path to `7z.exe`
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` if you want notifications
+
+   The per-case output folder is auto-detected from the simulator's log (`Output directory:` line, quoted or unquoted). If the line isn't seen, zip and remove are skipped for that case.
 3. Install dependencies:
    ```powershell
    pip install -r requirements.txt

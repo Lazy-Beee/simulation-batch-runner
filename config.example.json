@@ -1,7 +1,6 @@
 {
   "simulator": {
     "default_exe": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\SPHSimulator.exe",
-    "output_path": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\output",
     "zip_path": "C:\\Program Files\\7-Zip\\7z.exe"
   },
   "defaults": {

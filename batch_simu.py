@@ -139,12 +139,18 @@ def main():
         if result.returncode == 0:
             time_costs.append(result.elapsed)
             if zip_output:
-                zipped = sim.zip_case_output(case_name)
-                if remove_output:
-                    if zipped:
-                        sim.remove_case_output(case_name)
-                    else:
-                        sim.info(f"Output removal cancelled for of case '{case_name}'", tag="Case")
+                if not result.output_folder:
+                    sim.info(
+                        f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
+                        tag="Case",
+                    )
+                else:
+                    zipped = sim.zip_case_output(case_name, result.output_folder)
+                    if remove_output:
+                        if zipped:
+                            sim.remove_case_output(case_name, result.output_folder)
+                        else:
+                            sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
         else:
             time_costs.append(-1)
             total_failures += 1

@@ -40,6 +40,40 @@ ROW_STYLE_BY_STATUS = {
     STATUS_ERROR: "on red3",
 }
 
+# Fixed widths for the Setup scene_queue. Padding cell content to these widths
+# (with the row-style applied) is what fills the entire row's background with
+# the status colour - DataTable's own column padding ignores cell text styles.
+QUEUE_COLS = [
+    ("#", 4),
+    ("Exe", 22),
+    ("Scene", 30),
+    ("OMP", 5),
+    ("MPI", 5),
+    ("Zip", 5),
+    ("Rmv", 5),
+]
+
+DONE_COLS = [
+    ("#", 4),
+    ("Exe", 22),
+    ("Case", 24),
+    ("OMP", 5),
+    ("MPI", 5),
+    ("Zip", 5),
+    ("Rmv", 5),
+    ("Status", 12),
+    ("Time", 10),
+    ("Warnings", 9),
+    ("Errors", 7),
+]
+
+
+def styled_cell(value, width: int, style: str) -> Text:
+    """Build a left-justified Text padded to `width` with `style` applied to
+    the whole span (including the trailing spaces), so the cell background
+    colour fills the entire cell rather than just the printable characters."""
+    return Text(str(value).ljust(width), style=style)
+
 
 @dataclass
 class SceneEntry:
@@ -283,24 +317,24 @@ class BatchSimuApp(App):
 
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
-        # Try to preserve cursor row across refresh
         prev = table.cursor_row if table.row_count else None
         table.clear()
+        widths = [w for _, w in QUEUE_COLS]
         for i, e in enumerate(self.scene_entries):
             scene_disp = self._short(e.scene_path)
             if not os.path.exists(e.scene_path):
-                scene_disp += "  [MISSING]"
-            row_style = ROW_STYLE_BY_STATUS.get(e.status, "")
-            cells = [
-                Text(str(i + 1), style=row_style),
-                Text(self._short(e.exe_path), style=row_style),
-                Text(scene_disp, style=row_style),
-                Text(self._fmt_omp(e.omp_threads), style=row_style),
-                Text(self._fmt_mpi(e.mpi_ranks), style=row_style),
-                Text(self._fmt_bool(e.zip_output), style=row_style),
-                Text(self._fmt_bool(e.remove_output), style=row_style),
+                scene_disp += " [!]"
+            sty = ROW_STYLE_BY_STATUS.get(e.status, "")
+            values = [
+                str(i + 1),
+                self._short(e.exe_path),
+                scene_disp,
+                self._fmt_omp(e.omp_threads),
+                self._fmt_mpi(e.mpi_ranks),
+                self._fmt_bool(e.zip_output),
+                self._fmt_bool(e.remove_output),
             ]
-            table.add_row(*cells)
+            table.add_row(*(styled_cell(v, w, sty) for v, w in zip(values, widths)))
         if prev is not None and 0 <= prev < table.row_count:
             table.move_cursor(row=prev)
 
@@ -353,7 +387,11 @@ class BatchSimuApp(App):
         table = self.query_one("#done_table", DataTable)
         elapsed_str = "-" if entry.elapsed is None or entry.elapsed < 0 else str(datetime.timedelta(seconds=entry.elapsed))
         case_name = self.simulator.case_name_from_path(entry.scene_path)
-        table.add_row(
+        # Use the same status-to-row-style mapping so the Done table is
+        # consistent with the Setup queue.
+        sty = ROW_STYLE_BY_STATUS.get(entry.status, "")
+        widths = [w for _, w in DONE_COLS]
+        values = [
             str(idx + 1),
             self._short(entry.exe_path),
             case_name,
@@ -365,7 +403,8 @@ class BatchSimuApp(App):
             elapsed_str,
             str(entry.warnings),
             str(entry.errors),
-        )
+        ]
+        table.add_row(*(styled_cell(v, w, sty) for v, w in zip(values, widths)))
 
     def update_summary(self, total: int, done: int, failures: int, errors: int, warnings: int):
         self.query_one("#summary_label", Static).update(
@@ -377,12 +416,11 @@ class BatchSimuApp(App):
 
     def on_mount(self):
         queue = self.query_one("#scene_queue", DataTable)
-        queue.add_columns("#", "Exe", "Scene", "OMP", "MPI", "Zip", "Rmv")
+        for label, width in QUEUE_COLS:
+            queue.add_column(label, width=width)
         done = self.query_one("#done_table", DataTable)
-        done.add_columns(
-            "#", "Exe", "Case", "OMP", "MPI", "Zip", "Rmv",
-            "Status", "Time", "Warnings", "Errors",
-        )
+        for label, width in DONE_COLS:
+            done.add_column(label, width=width)
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
 

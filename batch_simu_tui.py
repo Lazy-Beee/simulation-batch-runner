@@ -467,10 +467,14 @@ class BatchSimuApp(App):
         mpi_input.disabled = not supports
 
     def switch_tab(self, tab_id: str):
+        """Activate a tab by id. Uses TabbedContent.show_tab() which is the
+        documented public API; assigning to .active directly was not always
+        propagating to the visible tab bar in real terminals."""
         try:
-            self.query_one(TabbedContent).active = tab_id
-            # Force a refresh - in some terminals the tab bar repaint can
-            # otherwise be missed if the surrounding event loop is busy.
+            tc = self.query_one(TabbedContent)
+            tc.show_tab(tab_id)
+            # Belt-and-braces: keep .active in sync and force a repaint.
+            tc.active = tab_id
             self.refresh()
         except Exception:
             pass
@@ -596,13 +600,23 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#view_log_btn")
     async def on_view_log(self):
-        """Open (or switch to) a per-case tab showing that case's captured log."""
+        """Open (or switch to) a per-case tab showing that case's captured log.
+
+        Only finished cases get a log tab. For a running case the live log is
+        already on the Running tab; pending cases have nothing to show yet.
+        """
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
             self.log_line("Select a row first to view its log.", "warning")
             return
         entry = self.scene_entries[idx]
+        if entry.status == STATUS_PENDING:
+            self.log_line("That case hasn't run yet - nothing to show.", "warning")
+            return
+        if entry.status == STATUS_RUNNING:
+            self.log_line("That case is still running - watch the Running tab.", "warning")
+            return
         await self._open_case_tab(entry)
 
     async def _open_case_tab(self, entry: SceneEntry):

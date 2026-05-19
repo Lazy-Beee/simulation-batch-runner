@@ -32,7 +32,6 @@ class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
     TabbedContent { height: 1fr; }
-    TabPane { height: 1fr; }
 
     #setup_scroll { width: 100%; height: 1fr; }
 
@@ -41,7 +40,12 @@ class BatchSimuApp(App):
     .narrow { width: 10; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
-    Static { width: 100%; }
+
+    #sim_type_label, #status_label,
+    #current_case_label, #current_step_label, #current_stats_label,
+    #summary_label {
+        width: 100%;
+    }
 
     #scene_list { height: 8; border: tall $panel; }
     #log_panel { height: 1fr; border: solid $accent; }

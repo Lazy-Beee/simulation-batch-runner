@@ -117,7 +117,7 @@ class TopBar(Horizontal):
     def compose(self) -> ComposeResult:
         yield Label("Batch Simulation", id="topbar_title")
         yield Label("", id="topbar_spacer")
-        yield Label("CPU --.- % | MEM --.- %", id="topbar_stats")
+        yield Label("CPU --.- % | MEM --.- GB / --.- GB", id="topbar_stats")
         yield Label("--:--:--", id="topbar_clock")
 
 
@@ -493,8 +493,12 @@ class BatchSimuApp(App):
                 # interval=None -> percent since the previous call; first
                 # call after import returns 0, subsequent calls real %.
                 cpu = psutil.cpu_percent(interval=None)
-                mem = psutil.virtual_memory().percent
-                stats_label.update(f"CPU {cpu:4.1f}% | MEM {mem:4.1f}%")
+                vm = psutil.virtual_memory()
+                used_gb = vm.used / (1024 ** 3)
+                total_gb = vm.total / (1024 ** 3)
+                stats_label.update(
+                    f"CPU {cpu:4.1f}% | MEM {used_gb:4.1f} GB / {total_gb:4.1f} GB"
+                )
             else:
                 stats_label.update("(install psutil for CPU/MEM)")
         except Exception:

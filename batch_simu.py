@@ -4,11 +4,11 @@ import os
 import shlex
 import argparse
 
-from simulation import Simulator, load_config, detect_simulator_type, simulator_supports_mpi
+from simulation import Simulator, load_config, profile_name, profile_supports_mpi
 
 
 def prompt_exe(simulator: Simulator) -> str:
-    exe_path = input("SPHSimulator: ").strip().replace('"', "")
+    exe_path = input("Simulator exe: ").strip().replace('"', "")
     if not exe_path or not exe_path.lower().endswith(".exe") or not os.path.isfile(exe_path):
         if exe_path:
             if not exe_path.lower().endswith(".exe"):
@@ -79,8 +79,9 @@ def main():
     sim = Simulator(config)
 
     exe_path = prompt_exe(sim)
-    sim_type = detect_simulator_type(exe_path)
-    print(f"[INFO] Simulator type: {sim_type.upper() if sim_type != 'unknown' else 'unknown'}")
+    profile = sim.identify_profile(exe_path)
+    sim_name = profile_name(profile)
+    print(f"[INFO] Simulator profile: {sim_name}")
     batch_exe = sim.prepare_exe(exe_path)
 
     if prompt_omp(sim):
@@ -90,7 +91,7 @@ def main():
         sim.set_omp_env(None)
         print("[INFO] No OMP limit applied - system default.")
 
-    if simulator_supports_mpi(sim_type):
+    if profile_supports_mpi(profile):
         mpi_ranks = prompt_mpi(sim)
         if mpi_ranks > 0:
             print(f"[INFO] MPI enabled: {mpi_ranks} ranks via mpiexec.")
@@ -98,7 +99,7 @@ def main():
             print("[INFO] MPI disabled - single-process.")
     else:
         mpi_ranks = 0
-        print(f"[INFO] {sim_type.upper()} does not support MPI - single-process only.")
+        print(f"[INFO] {sim_name} does not support MPI - single-process only.")
 
     scene_files = prompt_files()
 

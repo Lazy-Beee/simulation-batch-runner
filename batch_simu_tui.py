@@ -15,16 +15,17 @@ from textual.widgets import (
     TabbedContent, TabPane, DataTable,
 )
 
-from simulation import Simulator, load_config, detect_simulator_type, simulator_supports_mpi
+from simulation import Simulator, load_config, profile_name, profile_supports_mpi, profile_step_marker
 
 
-def format_sim_type_text(exe_path: str) -> str:
-    sim_type = detect_simulator_type(exe_path)
-    if sim_type == "sph":
-        return "Type: SPH (single-process only - MPI not supported)"
-    if sim_type == "cammp":
-        return "Type: CAMMP"
-    return "Type: unknown"
+def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
+    profile = simulator.identify_profile(exe_path)
+    if profile is None:
+        return "Type: unknown"
+    name = profile_name(profile)
+    if not profile_supports_mpi(profile):
+        return f"Type: {name} (single-process only - MPI not supported)"
+    return f"Type: {name}"
 
 
 class BatchSimuApp(App):
@@ -76,6 +77,10 @@ class BatchSimuApp(App):
         self.current_case_start: float | None = None
         self.current_warnings = 0
         self.current_errors = 0
+        self.current_step_marker: str | None = None
+        # Tracks the most recently applied profile so we only re-snap the
+        # OMP/MPI switches when the matched profile actually transitions.
+        self._last_profile_name: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -87,11 +92,11 @@ class BatchSimuApp(App):
                         yield Input(
                             value=self.simulator.default_exe,
                             id="exe_input",
-                            placeholder="path to SPHSimulator.exe or CAMMP.exe",
+                            placeholder="path to simulator exe (matched against simulator_profiles in config)",
                         )
-                    yield Static(format_sim_type_text(self.simulator.default_exe), id="sim_type_label")
+                    yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
                     with Horizontal(classes="row"):
-                        yield Switch(value=True, id="omp_switch")
+                        yield Switch(value=False, id="omp_switch")
                         yield Label(f"Limit OMP to {self.simulator.default_omp_threads}")
                         yield Switch(value=False, id="mpi_switch")
                         yield Label("MPI ranks:")
@@ -153,7 +158,11 @@ class BatchSimuApp(App):
             self._refresh_current_stats()
         elif kind == "step":
             widget.write(f"[cyan]{line}[/cyan]")
-            step_text = line[line.find("[step]"):] if "[step]" in line else line
+            marker = self.current_step_marker
+            if marker and marker in line:
+                step_text = line[line.find(marker):].rstrip()
+            else:
+                step_text = line.rstrip()
             self.query_one("#current_step_label", Static).update(f"Step: {step_text}")
         elif kind == "info":
             widget.write(f"[blue]{line}[/blue]")
@@ -187,11 +196,27 @@ class BatchSimuApp(App):
         self.query_one("#stop_btn", Button).disabled = True
 
     def apply_sim_type(self, exe_path: str):
-        self.query_one("#sim_type_label", Static).update(format_sim_type_text(exe_path))
-        supports = simulator_supports_mpi(detect_simulator_type(exe_path))
+        profile = self.simulator.identify_profile(exe_path)
+        self.query_one("#sim_type_label", Static).update(format_sim_type_text(self.simulator, exe_path))
+        supports = profile_supports_mpi(profile)
         mpi_switch = self.query_one("#mpi_switch", Switch)
         mpi_input = self.query_one("#mpi_input", Input)
+        omp_switch = self.query_one("#omp_switch", Switch)
+
+        # Only re-apply OMP/MPI switch defaults when the matched profile
+        # transitions (avoids clobbering manual toggles while the user types).
+        current_id = profile_name(profile)
+        if current_id != self._last_profile_name:
+            self._last_profile_name = current_id
+            omp_switch.value = bool(profile.get("default_omp", False)) if profile else False
+            if supports:
+                mpi_switch.value = bool(profile.get("default_mpi", False)) if profile else False
+            else:
+                mpi_switch.value = False
+
         if not supports:
+            # supports==False always forces MPI off, even when the profile
+            # didn't change (defensive in case profile_supports_mpi flipped).
             mpi_switch.value = False
         mpi_switch.disabled = not supports
         mpi_input.disabled = not supports
@@ -336,9 +361,13 @@ class BatchSimuApp(App):
         else:
             mpi_ranks = 0
 
-        sim_type = detect_simulator_type(exe_path)
-        if not simulator_supports_mpi(sim_type) and mpi_ranks > 0:
-            self.log_line(f"{sim_type.upper()} does not support MPI - forcing single-process.", "warning")
+        launch_profile = self.simulator.identify_profile(exe_path)
+        self.current_step_marker = profile_step_marker(launch_profile)
+        if not profile_supports_mpi(launch_profile) and mpi_ranks > 0:
+            self.log_line(
+                f"{profile_name(launch_profile)} does not support MPI - forcing single-process.",
+                "warning",
+            )
             mpi_ranks = 0
 
         zip_output = self.query_one("#zip_switch", Switch).value

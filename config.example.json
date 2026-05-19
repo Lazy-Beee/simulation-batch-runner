@@ -3,6 +3,24 @@
     "default_exe": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\SPHSimulator.exe",
     "zip_path": "C:\\Program Files\\7-Zip\\7z.exe"
   },
+  "simulator_profiles": [
+    {
+      "name": "SPlisHSPlasH",
+      "path_marker": "SPlisHSPlasH",
+      "supports_mpi": false,
+      "step_marker": "[step]",
+      "default_omp": false,
+      "default_mpi": false
+    },
+    {
+      "name": "CAMMP",
+      "path_marker": "CAMMP",
+      "supports_mpi": true,
+      "step_marker": "Processing job ",
+      "default_omp": false,
+      "default_mpi": true
+    }
+  ],
   "defaults": {
     "omp_threads": 24,
     "mpi_ranks": 4

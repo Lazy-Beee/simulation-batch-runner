@@ -57,23 +57,30 @@ def extract_output_dir(line: str) -> Optional[str]:
     return rest
 
 
-def detect_simulator_type(exe_path: str) -> str:
-    """Identify the simulator family from the exe path.
-
-    Returns 'sph' if the path contains 'SPlisHSPlasH', 'cammp' if it contains
-    'CAMMP', otherwise 'unknown'. Case-insensitive.
-    """
+def match_profile(exe_path: str, profiles: List[dict]) -> Optional[dict]:
+    """Find the first profile whose path_marker (case-insensitive substring) occurs in exe_path."""
     p = exe_path.lower()
-    if "splishsplash" in p:
-        return "sph"
-    if "cammp" in p:
-        return "cammp"
-    return "unknown"
+    for prof in profiles:
+        marker = (prof.get("path_marker") or "").lower()
+        if marker and marker in p:
+            return prof
+    return None
 
 
-def simulator_supports_mpi(sim_type: str) -> bool:
-    """SPHSimulator has no MPI build; CAMMP does. Unknown defaults to allow."""
-    return sim_type != "sph"
+def profile_name(profile: Optional[dict]) -> str:
+    return profile["name"] if profile else "unknown"
+
+
+def profile_supports_mpi(profile: Optional[dict]) -> bool:
+    """Unknown simulator defaults to allow MPI (we don't know enough to forbid it)."""
+    return True if profile is None else bool(profile.get("supports_mpi", True))
+
+
+def profile_step_marker(profile: Optional[dict]) -> Optional[str]:
+    if profile is None:
+        return None
+    marker = profile.get("step_marker")
+    return marker or None
 
 
 class TelegramNotice:
@@ -133,6 +140,8 @@ class Simulator:
         self.default_omp_threads = defaults.get("omp_threads", 24)
         self.default_mpi_ranks = defaults.get("mpi_ranks", 4)
 
+        self.profiles: List[dict] = list(config.get("simulator_profiles", []))
+
         self.tg = TelegramNotice(config.get("telegram", {}))
 
         # Frontend hook for info/warning/error lines. CLI keeps the default print;
@@ -142,6 +151,10 @@ class Simulator:
     def info(self, msg: str, tag: str = ""):
         self.tg.send_message(msg, tag=tag)
         self.write_console(f"[{tag}] {msg}" if tag else msg, "info")
+
+    def identify_profile(self, exe_path: str) -> Optional[dict]:
+        """Match the exe path against configured simulator profiles. None if no match."""
+        return match_profile(exe_path, self.profiles)
 
     @staticmethod
     def case_name_from_path(file_path: str) -> str:
@@ -188,9 +201,10 @@ class Simulator:
         """Run a single simulation case.
 
         on_line(line, kind): called per stdout line with the full original line.
-            kind is the most-specific match: "step" (SPH "[step]" or CAMMP
-            "Processing job"), "error" ("[ERROR]"), "warning" ("[WARNING]"),
-            or "raw" otherwise. Fires exactly once per line.
+            kind is the most-specific match: "step" (line contains the configured
+            simulator profile's step_marker), "error" ("[ERROR]"),
+            "warning" ("[WARNING]"), or "raw" otherwise. Fires exactly once per
+            line.
         process_holder: if a list is passed, the Popen handle is appended so
             the caller can terminate it.
         """
@@ -199,6 +213,7 @@ class Simulator:
         warnings = 0
         errors = 0
         output_folder: Optional[str] = None
+        step_marker = profile_step_marker(self.identify_profile(exe_path))
 
         self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{total}):")
         self.info(
@@ -220,21 +235,8 @@ class Simulator:
                 if candidate:
                     output_folder = candidate
 
-            if "[step]" in line:
-                # SPHSimulator step line:
-                # [<ts>] Debug:   [LoggerPro][step] n: 100/..., t: ..., p: ..., dt_A: ..., ...
-                line_terms = line.split("]")[-1].split(", ")
-                line_processed = line_terms[1].strip() + ", " + line_terms[-1].strip()
-                self.tg.send_message(
-                    f"({index+1}/{total}) {line_processed}",
-                    tag="Case",
-                )
-                if on_line:
-                    on_line(line, "step")
-            elif "Processing job " in line:
-                # CAMMP job step line:
-                # [<ts>] [INFO][Simulator] Processing job N on layer L track T
-                start = line.find("Processing job ")
+            if step_marker and step_marker in line:
+                start = line.find(step_marker)
                 line_processed = line[start:].rstrip()
                 self.tg.send_message(
                     f"({index+1}/{total}) {line_processed}",

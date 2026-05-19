@@ -237,8 +237,6 @@ class Simulator:
             return True
         except subprocess.CalledProcessError as e:
             self.info(f"Error during compression output of case '{case_name}': {e}", tag="Case")
-            if os.path.exists(zip_file):
-                os.remove(zip_file)
             return False
 
     def remove_case_output(self, case_name: str):

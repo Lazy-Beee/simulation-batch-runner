@@ -8,7 +8,7 @@ import datetime
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
     Header, Footer, Input, Label, Button, Switch,
     Static, RichLog, ListView, ListItem, ProgressBar,
@@ -31,12 +31,16 @@ class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
     TabbedContent { height: 1fr; }
+    TabPane { height: 1fr; }
 
-    .row { height: 3; align: left middle; }
+    #setup_scroll { width: 100%; height: 1fr; }
+
+    .row { width: 100%; height: 3; align: left middle; }
     Input { width: 1fr; }
     .narrow { width: 10; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
+    Static { width: 100%; }
 
     #scene_list { height: 8; border: tall $panel; }
     #log_panel { height: 1fr; border: solid $accent; }
@@ -77,7 +81,7 @@ class BatchSimuApp(App):
         yield Header(show_clock=True)
         with TabbedContent(initial="setup"):
             with TabPane("Setup", id="setup"):
-                with Vertical():
+                with VerticalScroll(id="setup_scroll"):
                     with Horizontal(classes="row"):
                         yield Label("Simulator:")
                         yield Input(
@@ -232,7 +236,7 @@ class BatchSimuApp(App):
 
     def on_mount(self):
         table = self.query_one("#done_table", DataTable)
-        table.add_columns("#", "Case", "Status", "Time", "W", "E")
+        table.add_columns("#", "Case", "Status", "Time", "Warnings", "Errors")
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
 
@@ -445,7 +449,8 @@ class BatchSimuApp(App):
                 self.call_from_thread(self.update_summary, total, i + 1, total_failures, total_errors, total_warnings)
                 self.call_from_thread(
                     self.set_status,
-                    f"Done {i+1}/{total} | W: {total_warnings} E: {total_errors} F: {total_failures}",
+                    f"Done {i+1}/{total} | "
+                    f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
                 )
 
             self.call_from_thread(self.set_progress, 100)
@@ -462,7 +467,8 @@ class BatchSimuApp(App):
             self.call_from_thread(self.switch_tab, "done")
             self.call_from_thread(
                 self.set_status,
-                f"Idle | Total: {total} | W: {total_warnings} E: {total_errors} F: {total_failures}",
+                f"Idle | Total: {total} | "
+                f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
             )
 
     def on_unmount(self):

@@ -1,6 +1,8 @@
 """Textual TUI frontend for batch simulation - 2-tab layout (Setup + Running)."""
 
 import os
+import sys
+import subprocess
 import time as _time
 import shlex
 import datetime
@@ -81,6 +83,30 @@ def styled_cell(value, width: int, style: str) -> Text:
     the whole span (including the trailing spaces), so the cell background
     colour fills the entire cell rather than just the printable characters."""
     return Text(str(value).ljust(width), style=style)
+
+
+def kill_proc_tree(proc):
+    """Best-effort terminate a process and all of its children.
+
+    proc.terminate() on Windows only kills the immediate process, which is
+    wrong for .bat / wrapper exes whose actual work runs in a child
+    process. Windows' taskkill /F /T walks the process tree.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=5,
+            )
+            return
+        except Exception:
+            pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -388,6 +414,9 @@ class BatchSimuApp(App):
     def switch_tab(self, tab_id: str):
         try:
             self.query_one(TabbedContent).active = tab_id
+            # Force a refresh - in some terminals the tab bar repaint can
+            # otherwise be missed if the surrounding event loop is busy.
+            self.refresh()
         except Exception:
             pass
 
@@ -644,18 +673,16 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#force_stop_btn")
     def on_force_stop(self):
-        """Immediate stop: terminate the running subprocess. The current
-        entry is marked STOPPED (removable) instead of FAILED."""
+        """Immediate stop: kill the running subprocess and every child it
+        spawned (taskkill /F /T on Windows). The current entry is marked
+        STOPPED (removable) instead of FAILED."""
         if not self.batch_running:
             return
         self.stop_requested = True
         self.force_stopped_current = True
         for proc in self.process_holder:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        self.log_line("--- Force stop: terminating current case ---", "warning")
+            kill_proc_tree(proc)
+        self.log_line("--- Force stop: terminating current case (process tree) ---", "warning")
 
     @on(Button.Pressed, "#resume_btn")
     def on_resume(self):

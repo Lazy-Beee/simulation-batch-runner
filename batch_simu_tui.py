@@ -467,13 +467,23 @@ class BatchSimuApp(App):
         mpi_input.disabled = not supports
 
     def switch_tab(self, tab_id: str):
-        """Activate a tab by id. Uses TabbedContent.show_tab() which is the
-        documented public API; assigning to .active directly was not always
-        propagating to the visible tab bar in real terminals."""
+        """Activate a tab by id.
+
+        Textual's TabbedContent.show_tab() is just an unhide helper - it does
+        NOT switch the active pane. The actual switch is `tc.active = tab_id`,
+        which fires the internal _watch_active watcher.
+
+        We additionally drop focus before switching: if a Button on the
+        previous tab still has focus when the active pane changes, Textual
+        snaps back to keep the focused widget visible (causing the "screen
+        flashes but tab stays put" symptom).
+        """
         try:
             tc = self.query_one(TabbedContent)
-            tc.show_tab(tab_id)
-            # Belt-and-braces: keep .active in sync and force a repaint.
+            try:
+                self.set_focus(None)
+            except Exception:
+                pass
             tc.active = tab_id
             self.refresh()
         except Exception:

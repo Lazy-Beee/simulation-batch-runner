@@ -97,7 +97,13 @@ class BatchSimuApp(App):
                     yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
                     with Horizontal(classes="row"):
                         yield Switch(value=False, id="omp_switch")
-                        yield Label(f"Limit OMP to {self.simulator.default_omp_threads}")
+                        yield Label("OMP threads:")
+                        yield Input(
+                            value=str(self.simulator.default_omp_threads),
+                            id="omp_input",
+                            classes="narrow",
+                            type="integer",
+                        )
                         yield Switch(value=False, id="mpi_switch")
                         yield Label("MPI ranks:")
                         yield Input(
@@ -349,6 +355,17 @@ class BatchSimuApp(App):
             return
 
         use_omp = self.query_one("#omp_switch", Switch).value
+        omp_input = self.query_one("#omp_input", Input).value.strip()
+        if use_omp:
+            try:
+                omp_threads = int(omp_input) if omp_input else self.simulator.default_omp_threads
+                if omp_threads < 1:
+                    omp_threads = self.simulator.default_omp_threads
+            except ValueError:
+                omp_threads = self.simulator.default_omp_threads
+        else:
+            omp_threads = None
+
         use_mpi = self.query_one("#mpi_switch", Switch).value
         mpi_input = self.query_one("#mpi_input", Input).value.strip()
         if use_mpi:
@@ -373,7 +390,7 @@ class BatchSimuApp(App):
         zip_output = self.query_one("#zip_switch", Switch).value
         remove_output = self.query_one("#remove_switch", Switch).value
 
-        self.simulator.set_omp_env(self.simulator.default_omp_threads if use_omp else None)
+        self.simulator.set_omp_env(omp_threads)
         self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
 
         try:

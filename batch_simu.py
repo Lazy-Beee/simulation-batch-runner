@@ -20,13 +20,25 @@ def prompt_exe(simulator: Simulator) -> str:
     return exe_path
 
 
-def prompt_omp(simulator: Simulator) -> bool:
+def prompt_omp(simulator: Simulator):
+    """Return an int thread count, or None for no limit."""
     while True:
-        ans = input(f"Limit OMP_NUM_THREADS to {simulator.default_omp_threads}? (Y/N): ").strip().upper()
+        ans = input("Limit OMP_NUM_THREADS? (Y/N): ").strip().upper()
         if ans == "Y":
-            return True
+            while True:
+                t = input(f"Number of OMP threads (default {simulator.default_omp_threads}): ").strip()
+                if t == "":
+                    return simulator.default_omp_threads
+                try:
+                    n = int(t)
+                    if n < 1:
+                        print("Thread count must be at least 1.")
+                        continue
+                    return n
+                except ValueError:
+                    print("Invalid number.")
         if ans == "N":
-            return False
+            return None
         print("Invalid input. Please type Y or N.")
 
 
@@ -84,12 +96,12 @@ def main():
     print(f"[INFO] Simulator profile: {sim_name}")
     batch_exe = sim.prepare_exe(exe_path)
 
-    if prompt_omp(sim):
-        sim.set_omp_env(sim.default_omp_threads)
-        print(f"[INFO] OMP_NUM_THREADS set to {sim.default_omp_threads}.")
-    else:
-        sim.set_omp_env(None)
+    omp_threads = prompt_omp(sim)
+    sim.set_omp_env(omp_threads)
+    if omp_threads is None:
         print("[INFO] No OMP limit applied - system default.")
+    else:
+        print(f"[INFO] OMP_NUM_THREADS set to {omp_threads}.")
 
     if profile_supports_mpi(profile):
         mpi_ranks = prompt_mpi(sim)

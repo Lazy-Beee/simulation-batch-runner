@@ -2,7 +2,7 @@
 
 Sequential batch runner for CLI simulators invoked as `<exe> --scene-file <path>`. Iterates through a list of scene files, runs each one, and produces a per-case + batch summary. Supports OpenMP thread limiting, MPI launch (per simulator profile), output compression with 7-Zip, and Telegram progress notifications.
 
-Simulator-specific behavior (display name, MPI capability, step-line marker, initial switch defaults) is fully data-driven via the `simulator_profiles` array in `config.json`. The matching profile is picked by case-insensitive substring match on the exe path. Out of the box, the template ships with profiles for `SPlisHSPlasH` and `CAMMP`; add more for any other CLI simulator that follows the same `--scene-file` / `[ERROR]` / `[WARNING]` / `Output directory:` conventions.
+Simulator-specific behavior (display name, MPI capability, step-line marker) is fully data-driven via the `simulator_profiles` array in `config.json`. The matching profile is picked by case-insensitive substring match on the exe path. Out of the box, the template ships with profiles for `SPlisHSPlasH` and `CAMMP`; add more for any other CLI simulator that follows the same `--scene-file` / `[ERROR]` / `[WARNING]` / `Output directory:` conventions.
 
 Two frontends share the same core (`simulation.py`):
 
@@ -19,7 +19,7 @@ Two frontends share the same core (`simulation.py`):
    - `simulator.default_exe` — exe path used when the user leaves the input blank
    - `simulator.zip_path` — path to `7z.exe`
    - `simulator_profiles[]` — one entry per simulator family. Each entry has:
-     - `name` — display label (shown in TUI Type line)
+     - `name` — display label (shown in TUI Type line and CLI prompt)
      - `path_marker` — case-insensitive substring matched against the exe path
      - `supports_mpi` — `false` disables MPI controls and skips the MPI prompt
      - `step_marker` — substring that identifies a step/progress line in stdout; used to drive the Running tab's step indicator and Telegram per-step messages
@@ -66,7 +66,7 @@ python batch_simu.py [--no-zip] [--keep-output]
 
 The script will prompt for:
 - `Simulator exe`: path to the simulator exe (blank = use `default_exe` from config)
-- `Limit OMP_NUM_THREADS`: cap OpenMP threads to the configured default
+- `Limit OMP_NUM_THREADS`: if yes, asks for thread count (Enter accepts the configured default)
 - `Launch with MPI`: if yes, asks for rank count and uses `mpiexec -n N` (skipped when the matched profile has `supports_mpi: false`)
 - `Add scene file`: paste one or more scene paths (quote paths with spaces); empty line to finish
 

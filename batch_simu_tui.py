@@ -161,6 +161,10 @@ class SceneEntry:
     elapsed: Optional[int] = None
     warnings: int = 0
     errors: int = 0
+    # Captured (line, kind) pairs for this case. The Running tab shows the
+    # live unified stream; this buffer feeds the per-case tab a user can
+    # pop open from the Setup queue to look at one case in isolation.
+    log_buffer: list = field(default_factory=list)
 
 
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
@@ -232,6 +236,7 @@ class BatchSimuApp(App):
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("f1", "show_tab('setup')", "Setup"),
         Binding("f2", "show_tab('running')", "Running"),
+        Binding("ctrl+w", "close_tab", "Close case tab"),
     ]
 
     def __init__(self):
@@ -297,6 +302,7 @@ class BatchSimuApp(App):
                     with Horizontal(classes="row"):
                         yield Button("Up", id="up_btn")
                         yield Button("Down", id="down_btn")
+                        yield Button("View log", id="view_log_btn")
                         yield Button("Remove selected", id="remove_btn")
 
                     yield DataTable(id="scene_queue", zebra_stripes=True, cell_padding=0)
@@ -328,29 +334,42 @@ class BatchSimuApp(App):
 
     # ---------- helpers ----------
 
+    _KIND_COLOR = {
+        "error": "red",
+        "warning": "yellow",
+        "step": "cyan",
+        "info": "blue",
+    }
+
+    @classmethod
+    def _write_log_line(cls, widget: RichLog, line: str, kind: str):
+        """Style-and-write a single (line, kind) pair to any RichLog without
+        touching app-wide state. Used by both the Running tab log writer and
+        the per-case tab replay."""
+        line = line.rstrip("\n")
+        color = cls._KIND_COLOR.get(kind)
+        if color:
+            widget.write(f"[{color}]{line}[/{color}]")
+        else:
+            widget.write(line)
+
     def log_line(self, line: str, kind: str = "raw"):
         widget = self.query_one("#log_panel", RichLog)
-        line = line.rstrip("\n")
+        self._write_log_line(widget, line, kind)
+        # Side-effects only relevant to the live Running tab
         if kind == "error":
-            widget.write(f"[red]{line}[/red]")
             self.current_errors += 1
             self._refresh_current_stats()
         elif kind == "warning":
-            widget.write(f"[yellow]{line}[/yellow]")
             self.current_warnings += 1
             self._refresh_current_stats()
         elif kind == "step":
-            widget.write(f"[cyan]{line}[/cyan]")
             marker = self.current_step_marker
             if marker and marker in line:
                 step_text = line[line.find(marker):].rstrip()
             else:
                 step_text = line.rstrip()
             self.query_one("#current_step_label", Static).update(f"Step: {step_text}")
-        elif kind == "info":
-            widget.write(f"[blue]{line}[/blue]")
-        else:
-            widget.write(line)
 
     def _refresh_current_stats(self):
         if self.current_case_start is None:
@@ -575,6 +594,59 @@ class BatchSimuApp(App):
         inp.value = ""
         inp.focus()
 
+    @on(Button.Pressed, "#view_log_btn")
+    async def on_view_log(self):
+        """Open (or switch to) a per-case tab showing that case's captured log."""
+        table = self.query_one("#scene_queue", DataTable)
+        idx = table.cursor_row
+        if idx is None or not (0 <= idx < len(self.scene_entries)):
+            self.log_line("Select a row first to view its log.", "warning")
+            return
+        entry = self.scene_entries[idx]
+        await self._open_case_tab(entry)
+
+    async def _open_case_tab(self, entry: SceneEntry):
+        tc = self.query_one(TabbedContent)
+        tab_id = f"case-{id(entry)}"
+        # If a tab for this entry already exists, just switch to it.
+        try:
+            tc.get_pane(tab_id)
+            tc.active = tab_id
+            return
+        except Exception:
+            pass
+
+        case_name = self.simulator.case_name_from_path(entry.scene_path)
+        log_widget = RichLog(highlight=False, markup=True, wrap=False, max_lines=20000)
+        pane = TabPane(case_name, log_widget, id=tab_id)
+        await tc.add_pane(pane)
+        # Replay the buffered lines into the new widget
+        for line, kind in entry.log_buffer:
+            self._write_log_line(log_widget, line, kind)
+        if not entry.log_buffer:
+            log_widget.write("[dim](no output yet)[/dim]")
+        tc.active = tab_id
+
+    async def action_close_tab(self):
+        """Close the active tab unless it's setup or running (those are pinned)."""
+        tc = self.query_one(TabbedContent)
+        active = tc.active
+        if not active or active in ("setup", "running"):
+            return
+        try:
+            await tc.remove_pane(active)
+        except Exception:
+            pass
+
+    async def _close_all_case_tabs(self):
+        tc = self.query_one(TabbedContent)
+        for pane in list(tc.query(TabPane)):
+            if pane.id and pane.id.startswith("case-"):
+                try:
+                    await tc.remove_pane(pane.id)
+                except Exception:
+                    pass
+
     @on(Button.Pressed, "#remove_btn")
     def on_remove(self):
         table = self.query_one("#scene_queue", DataTable)
@@ -629,7 +701,7 @@ class BatchSimuApp(App):
             table.move_cursor(row=new_idx)
 
     @on(Button.Pressed, "#reset_btn")
-    def on_reset(self):
+    async def on_reset(self):
         if self.batch_running:
             self.log_line("Cannot reset while a batch is running. Stop first.", "warning")
             return
@@ -640,6 +712,8 @@ class BatchSimuApp(App):
             except Exception:
                 pass
         self._prepared_exes = {}
+        # Close any per-case tabs the user had opened
+        await self._close_all_case_tabs()
         # Wipe queue
         self.scene_entries.clear()
         self.refresh_scene_queue()
@@ -871,7 +945,12 @@ class BatchSimuApp(App):
 
                 self.process_holder.clear()
 
-                def on_line(line, kind):
+                # Reset the per-case log buffer so a re-run via START or
+                # RESUME doesn't append onto the previous run's output.
+                entry.log_buffer = []
+
+                def on_line(line, kind, _entry=entry):
+                    _entry.log_buffer.append((line, kind))
                     self.call_from_thread(self.log_line, line, kind)
 
                 try:

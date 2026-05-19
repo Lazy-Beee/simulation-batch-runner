@@ -611,7 +611,7 @@ class BatchSimuApp(App):
         # If a tab for this entry already exists, just switch to it.
         try:
             tc.get_pane(tab_id)
-            tc.active = tab_id
+            self.switch_tab(tab_id)
             return
         except Exception:
             pass
@@ -625,7 +625,9 @@ class BatchSimuApp(App):
             self._write_log_line(log_widget, line, kind)
         if not entry.log_buffer:
             log_widget.write("[dim](no output yet)[/dim]")
-        tc.active = tab_id
+        # Use switch_tab so the explicit self.refresh() force-flushes the
+        # tab-bar repaint (Textual sometimes drops it right after add_pane).
+        self.switch_tab(tab_id)
 
     async def action_close_tab(self):
         """Close the active tab unless it's setup or running (those are pinned)."""

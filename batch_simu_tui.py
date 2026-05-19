@@ -81,10 +81,12 @@ class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
     TabbedContent { height: 1fr; }
+    TabPane { height: 1fr; }
 
-    /* Setup tab: top auto-height, middle table flexes, bottom auto-height */
-    #setup_panel { height: 100%; }
-    #setup_top, #setup_bottom { height: auto; }
+    /* Setup tab: flat layout - top widgets + scene_queue (1fr) + bottom widgets.
+       scene_queue is the only fr-sized child, so it absorbs all remaining
+       vertical space inside setup_panel. */
+    #setup_panel { height: 1fr; }
     #scene_queue { height: 1fr; border: tall $panel; }
 
     .row { width: 100%; height: 3; align: left middle; }
@@ -152,57 +154,55 @@ class BatchSimuApp(App):
         with TabbedContent(initial="setup"):
             with TabPane("Setup", id="setup"):
                 with Vertical(id="setup_panel"):
-                    with Vertical(id="setup_top"):
-                        with Horizontal(classes="row"):
-                            yield Label("Simulator:")
-                            yield Input(
-                                value=self.simulator.default_exe,
-                                id="exe_input",
-                                placeholder="path to simulator exe (drag a file in or paste)",
-                            )
-                        yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
+                    with Horizontal(classes="row"):
+                        yield Label("Simulator:")
+                        yield Input(
+                            value=self.simulator.default_exe,
+                            id="exe_input",
+                            placeholder="path to simulator exe (drag a file in or paste)",
+                        )
+                    yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
 
-                        with Horizontal(classes="row"):
-                            yield Label("Scene:")
-                            yield Input(
-                                id="add_file_input",
-                                placeholder="drag scene file(s) in or paste; Enter adds them with the settings below",
-                            )
+                    with Horizontal(classes="row"):
+                        yield Label("Scene:")
+                        yield Input(
+                            id="add_file_input",
+                            placeholder="drag scene file(s) in or paste; Enter adds them with the settings below",
+                        )
 
-                        with Horizontal(classes="row"):
-                            yield Switch(value=False, id="omp_switch")
-                            yield Label("OMP")
-                            yield Input(
-                                value=str(self.simulator.default_omp_threads),
-                                id="omp_input", classes="narrow", type="integer",
-                            )
-                            yield Switch(value=False, id="mpi_switch")
-                            yield Label("MPI")
-                            yield Input(
-                                value=str(self.simulator.default_mpi_ranks),
-                                id="mpi_input", classes="narrow", type="integer",
-                            )
-                            yield Switch(value=True, id="zip_switch")
-                            yield Label("Zip")
-                            yield Switch(value=True, id="remove_switch")
-                            yield Label("Remove")
-                            yield Button("Add", id="add_btn", variant="primary")
+                    with Horizontal(classes="row"):
+                        yield Switch(value=False, id="omp_switch")
+                        yield Label("OMP")
+                        yield Input(
+                            value=str(self.simulator.default_omp_threads),
+                            id="omp_input", classes="narrow", type="integer",
+                        )
+                        yield Switch(value=False, id="mpi_switch")
+                        yield Label("MPI")
+                        yield Input(
+                            value=str(self.simulator.default_mpi_ranks),
+                            id="mpi_input", classes="narrow", type="integer",
+                        )
+                        yield Switch(value=True, id="zip_switch")
+                        yield Label("Zip")
+                        yield Switch(value=True, id="remove_switch")
+                        yield Label("Remove")
+                        yield Button("Add", id="add_btn", variant="primary")
 
-                        with Horizontal(classes="row"):
-                            yield Button("Up", id="up_btn")
-                            yield Button("Down", id="down_btn")
-                            yield Button("Remove selected", id="remove_btn")
+                    with Horizontal(classes="row"):
+                        yield Button("Up", id="up_btn")
+                        yield Button("Down", id="down_btn")
+                        yield Button("Remove selected", id="remove_btn")
 
                     yield DataTable(id="scene_queue", zebra_stripes=True)
 
-                    with Vertical(id="setup_bottom"):
-                        with Horizontal(classes="row"):
-                            yield Button("START", id="start_btn", variant="success")
-                            yield Button("STOP", id="stop_btn", variant="error", disabled=True)
-                            yield Static("", id="bottom_filler")
-                            yield Button("Reset", id="reset_btn", variant="warning")
-                        yield Static("Idle", id="status_label")
-                        yield ProgressBar(id="progress", total=100, show_eta=False)
+                    with Horizontal(classes="row"):
+                        yield Button("START", id="start_btn", variant="success")
+                        yield Button("STOP", id="stop_btn", variant="error", disabled=True)
+                        yield Static("", id="bottom_filler")
+                        yield Button("Reset", id="reset_btn", variant="warning")
+                    yield Static("Idle", id="status_label")
+                    yield ProgressBar(id="progress", total=100, show_eta=False)
 
             with TabPane("Running", id="running"):
                 with Vertical():

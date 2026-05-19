@@ -885,13 +885,18 @@ class BatchSimuApp(App):
         self.stop_requested = False
         self.force_stopped_current = False
         self.process_holder = []
+
+        # Switch BEFORE disabling start_btn / resume_btn. Disabling a focused
+        # button causes Textual to auto-move focus to the next focusable
+        # widget (still on the Setup tab) - which then competes with our
+        # tab switch and snaps the active back to Setup.
+        self.switch_tab("running")
         self.query_one("#start_btn", Button).disabled = True
         self.query_one("#resume_btn", Button).disabled = True
         self.query_one("#stop_btn", Button).disabled = False
         self.query_one("#force_stop_btn", Button).disabled = False
         self.query_one("#reset_btn", Button).disabled = True
         self.set_progress(0)
-        self.switch_tab("running")
 
         # Pass the FULL entry list so per-entry indices in status messages
         # reflect their queue position; worker skips non-pending internally.

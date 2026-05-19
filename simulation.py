@@ -222,8 +222,18 @@ class Simulator:
         )
 
         cmd = self.build_cmd(exe_path, file_path, mpi_ranks)
+        # stderr is merged into stdout so a single reader drains both streams.
+        # Previously stderr was a separate PIPE with no reader, which lets the
+        # OS pipe buffer (~4-64 KB on Windows) fill up; once full, the
+        # simulator's next stderr write blocks indefinitely and the whole
+        # process hangs - showing up as the UI "freezing" even when stdout
+        # was only producing a line every few seconds.
+        # stdin is pointed at DEVNULL so a simulator that accidentally reads
+        # from stdin doesn't sit waiting for input that will never arrive.
         process = subprocess.Popen(
-            cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
         )
         if process_holder is not None:

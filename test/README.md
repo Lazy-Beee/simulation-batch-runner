@@ -1,12 +1,19 @@
 # Test setup
 
-A fake simulator that mimics SPHSimulator / CAMMP stdout (`[step]`, `[WARNING]`, `[ERROR]`, `Average time:`) for manual TUI/CLI testing — no real `SPHSimulator.exe` needed.
+A fake simulator that mimics SPHSimulator / CAMMP stdout for manual TUI/CLI testing — no real simulator build needed.
+
+The fake has two modes:
+
+1. **Synthetic** — generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNING]` / `[ERROR]` injections and failure points.
+2. **Replay** — streams a captured real log file as if it were live stdout. Useful for verifying parsing against real SPH and CAMMP output.
 
 ## Files
 
 - `fake_simulator.py` — the script
 - `fake_simulator.bat` — Windows wrapper that calls `python fake_simulator.py %*`
 - `scene_*.json` — sample scene files exercising different paths
+
+The two replay scenes point at `SPlisHSPlasH.txt` and `CAMMP.log` next to them. Those log files are **gitignored** (they can be large and are user-specific). Drop your own captures here with those filenames to use the replay scenes as-is, or write your own scene file with any other `replay` target.
 
 ## How to play
 
@@ -38,6 +45,8 @@ A fake simulator that mimics SPHSimulator / CAMMP stdout (`[step]`, `[WARNING]`,
 | `scene_errors.json` | 5 steps with 1 warning + 2 errors, exits 0 |
 | `scene_fail.json` | Fails at step 3 (exit 1) — tests failure handling |
 | `scene_long.json` | 30 steps to test long streaming and the Stop button |
+| `scene_replay_sph.json` | Replays `SPlisHSPlasH.txt` (2800 SPH `[step]` events, 2 warnings) |
+| `scene_replay_cammp.json` | Replays `CAMMP.log` (840 CAMMP "Processing job" events, 2979 warnings) |
 
 ## CLI alternative
 
@@ -48,7 +57,7 @@ At the prompt, type `test\fake_simulator.bat` for the simulator and paste scene 
 
 ## Customizing scenes
 
-Each scene JSON accepts:
+### Synthetic mode
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
@@ -57,3 +66,10 @@ Each scene JSON accepts:
 | `warnings_at` | list | `[]` | step indices that emit `[WARNING]` |
 | `errors_at` | list | `[]` | step indices that emit `[ERROR]` |
 | `fail_at` | int | `null` | step index after which to exit 1 |
+
+### Replay mode
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `replay` | str | — | path to a log file, relative to the scene file |
+| `replay_delay` | float | 0.0 | seconds between lines (0 = flood as fast as possible) |

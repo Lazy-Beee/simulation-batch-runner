@@ -16,10 +16,17 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
 from textual.widgets import (
-    Header, Footer, Input, Label, Button, Switch,
+    Footer, Input, Label, Button, Switch,
     Static, RichLog, ProgressBar,
     TabbedContent, TabPane, DataTable,
 )
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:  # graceful: TopBar shows a hint instead of stats
+    psutil = None
+    HAS_PSUTIL = False
 
 from simulation import Simulator, load_config, profile_name, profile_supports_mpi, profile_step_marker
 
@@ -83,6 +90,35 @@ def styled_cell(value, width: int, style: str) -> Text:
     the whole span (including the trailing spaces), so the cell background
     colour fills the entire cell rather than just the printable characters."""
     return Text(str(value).ljust(width), style=style)
+
+
+class TopBar(Horizontal):
+    """Replaces the default Header. Layout: title | spacer | CPU/MEM | clock."""
+
+    DEFAULT_CSS = """
+    TopBar {
+        dock: top;
+        height: 1;
+        background: $accent;
+        color: $background;
+    }
+    TopBar Label {
+        height: 1;
+        background: $accent;
+        color: $background;
+        padding: 0 1;
+    }
+    TopBar #topbar_title { padding: 0 2; text-style: bold; }
+    TopBar #topbar_spacer { width: 1fr; }
+    TopBar #topbar_stats { width: auto; }
+    TopBar #topbar_clock { width: auto; padding: 0 2; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label("Batch Simulation", id="topbar_title")
+        yield Label("", id="topbar_spacer")
+        yield Label("CPU --.- % | MEM --.- %", id="topbar_stats")
+        yield Label("--:--:--", id="topbar_clock")
 
 
 def kill_proc_tree(proc):
@@ -219,7 +255,7 @@ class BatchSimuApp(App):
         self._last_profile_name: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield TopBar()
         with TabbedContent(initial="setup"):
             with TabPane("Setup", id="setup"):
                 with Vertical(id="setup_panel"):
@@ -444,6 +480,25 @@ class BatchSimuApp(App):
             queue.add_column(label, width=width)
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
+        # Topbar clock + CPU/MEM refresh
+        self._refresh_topbar()
+        self.set_interval(1.0, self._refresh_topbar)
+
+    def _refresh_topbar(self):
+        try:
+            clock_text = datetime.datetime.now().strftime("%H:%M:%S")
+            self.query_one("#topbar_clock", Label).update(clock_text)
+            stats_label = self.query_one("#topbar_stats", Label)
+            if HAS_PSUTIL:
+                # interval=None -> percent since the previous call; first
+                # call after import returns 0, subsequent calls real %.
+                cpu = psutil.cpu_percent(interval=None)
+                mem = psutil.virtual_memory().percent
+                stats_label.update(f"CPU {cpu:4.1f}% | MEM {mem:4.1f}%")
+            else:
+                stats_label.update("(install psutil for CPU/MEM)")
+        except Exception:
+            pass
 
     # ---------- event handlers ----------
 

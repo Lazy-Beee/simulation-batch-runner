@@ -126,14 +126,11 @@ class Simulator:
 
     def prepare_exe(self, exe_path: str) -> str:
         dir_name, file_name = os.path.split(exe_path)
-        new_name = file_name.replace(".exe", ".batch.exe")
-        new_path = os.path.join(dir_name, new_name)
+        base, ext = os.path.splitext(file_name)
+        new_path = os.path.join(dir_name, f"{base}.batch{ext}")
         count = 1
         while os.path.isfile(new_path):
-            if count == 1:
-                new_path = new_path.replace(".exe", f".{count}.exe")
-            else:
-                new_path = new_path.replace(f".{count-1}.exe", f".{count}.exe")
+            new_path = os.path.join(dir_name, f"{base}.batch.{count}{ext}")
             count += 1
         shutil.copy2(exe_path, new_path)
         return new_path

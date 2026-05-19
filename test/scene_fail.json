@@ -1,0 +1,5 @@
+{
+  "steps": 10,
+  "step_time": 0.3,
+  "fail_at": 3
+}

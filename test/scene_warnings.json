@@ -1,0 +1,6 @@
+{
+  "steps": 6,
+  "step_time": 0.4,
+  "warnings_at": [2, 4],
+  "errors_at": []
+}

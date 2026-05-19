@@ -2,6 +2,11 @@
 
 Batch runner for [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH) `SPHSimulator.exe`. Iterates through a list of scene files, runs each one, and produces a per-case + batch summary. Supports OpenMP thread limiting, MPI launch, output compression with 7-Zip, and Telegram progress notifications.
 
+Two frontends share the same core (`simulation.py`):
+
+- **CLI** (`batch_simu.py`) — interactive prompts, suitable for SSH / minimal envs.
+- **TUI** (`batch_simu_tui.py`) — [Textual](https://textual.textualize.io/) terminal UI with live log, progress bar, and Start/Stop controls.
+
 ## Setup
 
 1. Copy the config template:
@@ -14,14 +19,31 @@ Batch runner for [SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/S
    - `simulator.zip_path` — path to `7z.exe`
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` if you want notifications
    - `sequential_tasks` — map a label to an executable to launch after the batch finishes (e.g. `prime95`)
-3. Install the one third-party dependency:
+3. Install dependencies:
    ```powershell
-   pip install requests
+   pip install -r requirements.txt
    ```
 
 `config.json` is gitignored — only the template is tracked.
 
-## Usage
+## Usage — TUI
+
+```powershell
+python batch_simu_tui.py
+```
+
+Single-screen layout: configuration panel on top, live log in the middle, status bar with progress at the bottom.
+
+Key bindings:
+
+| Key | Action |
+|---|---|
+| `Ctrl+S` | Start batch |
+| `Ctrl+X` | Stop current case (terminates the subprocess, ends the batch) |
+| `Ctrl+L` | Clear log |
+| `Ctrl+Q` | Quit |
+
+## Usage — CLI
 
 ```powershell
 python batch_simu.py [--no-zip] [--keep-output] [--sequential-task <name>]
@@ -49,7 +71,8 @@ The script will prompt for:
 
 ## Requirements
 
-- Python 3.8+
-- `requests` (only for Telegram; the script still runs without notifications if `telegram.enabled` is `false`)
+- Python 3.9+
+- `requests` (Telegram; the script still runs without notifications if `telegram.enabled` is `false`)
+- `textual>=0.50` (TUI only; CLI works without it)
 - 7-Zip (only if you want output compression)
 - `mpiexec` on PATH (only if you choose MPI)

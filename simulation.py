@@ -163,14 +163,17 @@ class Simulator:
     ) -> CaseResult:
         """Run a single simulation case.
 
-        on_line(line, kind): called per stdout line. kind in {"raw", "step", "error", "warning"}.
-        process_holder: if a list is passed, the Popen handle is appended so the caller can terminate it.
+        on_line(line, kind): called per stdout line with the full original line.
+            kind is the most-specific match: "step" (SPH "[step]" or CAMMP
+            "Processing job"), "error" ("[ERROR]"), "warning" ("[WARNING]"),
+            or "raw" otherwise. Fires exactly once per line.
+        process_holder: if a list is passed, the Popen handle is appended so
+            the caller can terminate it.
         """
         case_name = self.case_name_from_path(file_path)
         start_time = time.time()
         warnings = 0
         errors = 0
-        avg_started = False
 
         self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{total}):")
         self.info(
@@ -188,8 +191,21 @@ class Simulator:
 
         for line in process.stdout:
             if "[step]" in line:
+                # SPHSimulator step line:
+                # [<ts>] Debug:   [LoggerPro][step] n: 100/..., t: ..., p: ..., dt_A: ..., ...
                 line_terms = line.split("]")[-1].split(", ")
                 line_processed = line_terms[1].strip() + ", " + line_terms[-1].strip()
+                self.tg.send_message(
+                    f"({index+1}/{total}) {line_processed}",
+                    tag="Case",
+                )
+                if on_line:
+                    on_line(line, "step")
+            elif "Processing job " in line:
+                # CAMMP job step line:
+                # [<ts>] [INFO][Simulator] Processing job N on layer L track T
+                start = line.find("Processing job ")
+                line_processed = line[start:].rstrip()
                 self.tg.send_message(
                     f"({index+1}/{total}) {line_processed}",
                     tag="Case",
@@ -211,12 +227,6 @@ class Simulator:
             else:
                 if on_line:
                     on_line(line, "raw")
-
-            if "Average time:" in line:
-                if not avg_started:
-                    self.tg.queue_message("Average time: ")
-                    avg_started = True
-                self.tg.queue_message(line[len("Average time: ") - 1:].strip())
 
         process.wait()
         elapsed = round(time.time() - start_time)

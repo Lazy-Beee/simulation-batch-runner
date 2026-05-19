@@ -1,0 +1,19 @@
+{
+  "simulator": {
+    "default_exe": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\SPHSimulator.exe",
+    "output_path": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\output",
+    "zip_path": "C:\\Program Files\\7-Zip\\7z.exe"
+  },
+  "defaults": {
+    "omp_threads": 24,
+    "mpi_ranks": 4
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "sequential_tasks": {
+    "P95": "C:\\Program Files (JF)\\p95v3019b20.win64\\prime95.exe"
+  }
+}

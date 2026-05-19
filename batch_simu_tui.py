@@ -605,10 +605,26 @@ class BatchSimuApp(App):
     def action_show_tab(self, tab_id: str):
         self.switch_tab(tab_id)
 
+    @staticmethod
+    def _reset_entry_run_state(entry: SceneEntry):
+        """Clear the per-entry run-state fields so the worker picks it up
+        as a fresh PENDING case again."""
+        entry.status = STATUS_PENDING
+        entry.returncode = None
+        entry.elapsed = None
+        entry.warnings = 0
+        entry.errors = 0
+
     @on(Button.Pressed, "#start_btn")
     def on_start(self):
+        """Re-run the whole queue: every non-pending entry (done / failed /
+        missing / error / stopped) is reset to pending before launching."""
         if self.batch_running:
             return
+        for entry in self.scene_entries:
+            if entry.status != STATUS_PENDING:
+                self._reset_entry_run_state(entry)
+        self.refresh_scene_queue()
         self._launch_batch()
 
     def action_start(self):
@@ -643,10 +659,15 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#resume_btn")
     def on_resume(self):
-        """Resume the batch: process any entries still in PENDING status."""
+        """Continue the batch: pending entries get processed, and any
+        force-stopped entries are re-queued first. Already finished cases
+        (done / failed / missing / error) stay as a record."""
         if self.batch_running:
             return
-        # If everything has been run already, _launch_batch will warn.
+        for entry in self.scene_entries:
+            if entry.status == STATUS_STOPPED:
+                self._reset_entry_run_state(entry)
+        self.refresh_scene_queue()
         self._launch_batch()
 
     # ---------- batch orchestration ----------

@@ -57,16 +57,16 @@ Clock and stats refresh every second. CPU/Memory require `psutil` — without it
 
 ### Two tabs
 
-- **Setup** — primary workspace: simulator + scene inputs, settings row, queue table, run controls, status line, progress bar.
-- **Running** — current case header (`Case N/M: name`), latest step line, live elapsed / warnings / errors, streaming RichLog.
+- **Queue** — primary workspace: Simulator / Scene inputs, settings row, queue table, run controls, status line, progress bar.
+- **Running** — current case header (`Case N/M: name`), latest step line, live elapsed / warnings / errors, streaming RichLog with a Copy button to dump it to the clipboard.
 
 ![Running tab: case / step / stats header with Copy button over an accent-bordered live RichLog](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-running.png)
 
-Additionally, **per-case log tabs** can be popped open from the Setup queue (see *View log*) and closed individually. Setup and Running are pinned and can't be closed.
+Additionally, **per-case log tabs** can be popped open from the Queue table (see *View log*). Each carries its own Close button (or use `Ctrl+W` on the active case tab). Queue and Running are pinned and can't be closed.
 
 ![Case-log tab: Case (with Close button) / Simulator / Status-Time-Warnings-Errors-Copy header over an accent-bordered replay of the case log](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-case-log.png)
 
-### Setup workflow
+### Queue workflow
 
 1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable. The **Clear** button on the right empties the field and re-focuses it.
 2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
@@ -84,14 +84,14 @@ Additionally, **per-case log tabs** can be popped open from the Setup queue (see
 
 6. **Row actions** — with a row selected (cursor on it):
    - **Up / Down** — reorder pending entries. Running / finished rows are locked in place; pending rows can't jump over a non-pending neighbour.
-   - **View log** — opens (or switches to) a new tab replaying that case's captured log. Only available for finished cases (done / failed / stopped / missing / error); pending / running rows are rejected with a hint.
+   - **View log** — opens (or switches to) a new tab replaying that case's captured log. Only available for finished cases (done / failed / stopped / missing / error); pending / running rows are rejected with a hint. Close the tab with its Close button or `Ctrl+W`.
    - **Remove selected** — drops the row. Allowed for pending and stopped only; done / failed / etc. stay as a record.
 7. **Run controls** — bottom row:
    - **START** — resets every non-pending entry back to pending (clearing previous `Time` / `Warnings` / `Errors`) and runs the whole queue.
    - **STOP** — graceful: the current case finishes naturally, then the batch exits. Remaining pending cases stay pending.
    - **FORCE STOP** — kills the current process tree (`taskkill /F /T` on Windows). The in-flight entry is marked `stopped` (removable).
    - **RESUME** — re-queues `stopped` entries as pending and runs all pending. Done / failed / missing / error rows stay as a record.
-   - **Reset** (bottom-right) — wipes the queue, log, progress, prepared exe copies, and closes any open case tabs. Disabled while a batch is running.
+   - **Reset** (bottom-right) — wipes the queue, log, progress, per-Add exe snapshots, and closes any open case tabs. Disabled while a batch is running.
 
 ### Drag-and-drop
 
@@ -108,9 +108,9 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | `Ctrl+S` | START |
 | `Ctrl+X` | STOP (graceful) — hidden from Footer to keep key order stable while an Input is focused |
 | `Ctrl+L` | Clear log |
-| `Ctrl+W` | Close current case tab (Setup / Running are pinned) — hidden from Footer; inside an Input it's the Input's own delete-word |
+| `Ctrl+W` | Close current case tab (Queue / Running are pinned) — hidden from Footer; inside an Input it's the Input's own delete-word |
 | `Ctrl+Q` | Quit |
-| `F1` / `F2` | Jump to Setup / Running |
+| `F1` / `F2` | Jump to Queue / Running |
 
 ## Usage — CLI
 

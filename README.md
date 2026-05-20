@@ -144,7 +144,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 
 - Python 3.9+
 - `requests` — Telegram notifications
-- `textual>=0.50` — TUI only; CLI works without it
+- `textual>=1.0` — TUI only; CLI works without it. We rely on newer API (`App.copy_to_clipboard`, `Strip.text`, `events.DescendantFocus`, `Static.text_selection`); 0.x versions are missing some of these.
 - `psutil` — TUI TopBar CPU/MEM stats (optional; the TUI runs fine without)
 - 7-Zip — only if you want output compression
 - `mpiexec` on PATH — only if a profile sets `supports_mpi: true` and the user toggles MPI on

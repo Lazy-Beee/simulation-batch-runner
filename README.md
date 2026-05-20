@@ -41,7 +41,7 @@ Two frontends share the same core (`simulation.py`):
 python batch_simu_tui.py
 ```
 
-![Setup tab: simulator + scene inputs, settings row, status-coloured queue table, run controls](https://github.com/Lazy-Beee/simulation-batch-runner/releases/download/v1.0.1/tui-setup.png)
+![Queue tab: Simulator / Scene inputs, settings row, status-coloured queue table with accent border, run controls, progress bar](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-queue.png)
 
 ### Top bar
 
@@ -58,11 +58,11 @@ Clock and stats refresh every second. CPU/Memory require `psutil` — without it
 - **Setup** — primary workspace: simulator + scene inputs, settings row, queue table, run controls, status line, progress bar.
 - **Running** — current case header (`Case N/M: name`), latest step line, live elapsed / warnings / errors, streaming RichLog.
 
-![Running tab: live stdout, per-case stats, Copy button to grab the log](https://github.com/Lazy-Beee/simulation-batch-runner/releases/download/v1.0.1/tui-running.png)
+![Running tab: case / step / stats header with Copy button over an accent-bordered live RichLog](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-running.png)
 
 Additionally, **per-case log tabs** can be popped open from the Setup queue (see *View log*) and closed individually. Setup and Running are pinned and can't be closed.
 
-![Case-log tab: per-case header (Case / Simulator / Status / Time / Warnings / Errors) and the captured log replayed in its own tab](https://github.com/Lazy-Beee/simulation-batch-runner/releases/download/v1.0.1/tui-case-log.png)
+![Case-log tab: Case (with Close button) / Simulator / Status-Time-Warnings-Errors-Copy header over an accent-bordered replay of the case log](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-case-log.png)
 
 ### Setup workflow
 

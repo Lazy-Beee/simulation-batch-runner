@@ -26,6 +26,7 @@ Two frontends share the same core (`simulation.py`):
      - `path_marker` — case-insensitive substring matched against the exe path
      - `supports_mpi` — `false` disables MPI controls and skips the MPI prompt
      - `step_pattern` — Python regex (`re.search`) matching a step / progress line in stdout. Capture group 1 (if present) is the display text; otherwise the text from the first match position is shown. Drives the Running tab's step indicator and per-step Telegram messages. Escape regex metacharacters: SPlisHSPlasH's literal `[step]` becomes `\\[step\\]`.
+     - `eta_pattern` (optional) — Python regex with one capture group; applied to every step line to extract an ETA token (e.g. `7h57m`, `<1m`). The captured value is reformatted as `H:MM:SS` in the queue table's **ETA** column. Omit to disable ETA extraction for this profile.
      - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; re-applied only when the matched profile *transitions*
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` for notifications
 
@@ -71,8 +72,8 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
 1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable. The **Clear** button on the right empties the field and re-focuses it.
 2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
 3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch. These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
-4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items.
-5. **Queue table** — 11 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Status / Time / Warnings / Errors`. Each row's background reflects its status:
+4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items. Adding **during** a batch is fine: the worker reads the queue live and picks up the new entries as soon as the current case finishes.
+5. **Queue table** — 12 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Status / Time / ETA / Warnings / Errors`. Time ticks live (1 Hz) while a case is running; ETA is filled in from `step_pattern + eta_pattern` if the profile has one. Each row's background reflects its status:
 
    | Background | Status |
    |---|---|

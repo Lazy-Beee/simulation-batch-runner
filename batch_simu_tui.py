@@ -1310,6 +1310,16 @@ class BatchSimuApp(App):
 
                 def on_line(line, kind, _entry=entry, _eta_re=eta_re):
                     _entry.log_buffer.append((line, kind))
+                    # Tick the entry's own warning / error counters as lines
+                    # come in so the queue table's Warnings / Errors columns
+                    # update live. The post-run assignment from result.* below
+                    # stays as the authoritative final value.
+                    if kind == "warning":
+                        _entry.warnings += 1
+                        self.call_from_thread(self.refresh_scene_queue)
+                    elif kind == "error":
+                        _entry.errors += 1
+                        self.call_from_thread(self.refresh_scene_queue)
                     self.call_from_thread(self.log_line, line, kind)
                     if kind == "step" and _eta_re is not None:
                         m = _eta_re.search(line)

@@ -94,6 +94,16 @@ def profile_step_marker(profile: Optional[dict]) -> Optional[str]:
     return marker or None
 
 
+def profile_eta_pattern(profile: Optional[dict]) -> Optional[str]:
+    """Regex string used to pull an ETA value out of step lines. Capture
+    group 1 is the ETA token to display verbatim in the queue table
+    (e.g. '7h57m', '<1m'). None disables ETA extraction for this profile."""
+    if profile is None:
+        return None
+    pattern = profile.get("eta_pattern")
+    return pattern or None
+
+
 class TelegramNotice:
     def __init__(self, tg_config):
         self.enabled = tg_config.get("enabled", False)

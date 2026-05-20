@@ -39,7 +39,20 @@ Generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNI
 | `scene_warnings.json` | 6 steps with 2 `[WARNING]`, exits 0 |
 | `scene_errors.json` | 5 steps with 1 warning + 2 errors, exits 0 |
 | `scene_fail.json` | Fails at step 3 (exit 1) — tests failure handling |
-| `scene_long.json` | 30 steps to test long streaming and the Stop button |
+| `scene_long.json` | 30 steps with `eta_per_step: 30` so the ETA column ticks down from `14h30m` — exercises long streaming + the Stop button |
+
+> The ETA column only shows values when the matched simulator profile sets `eta_pattern` and the simulator emits a matching token. Because `test\fake_simulator.bat` doesn't match the `SPlisHSPlasH` / `CAMMP` path markers, it defaults to "Type: unknown" and ETA stays `-`. To see ETA extraction with the fake simulator, add a profile to `config.json` matching the fake exe:
+> ```json
+> {
+>   "name": "fake test sim",
+>   "path_marker": "fake_simulator",
+>   "supports_mpi": false,
+>   "step_marker": "[step]",
+>   "default_omp": false,
+>   "default_mpi": false,
+>   "eta_pattern": "eta:\\s*(\\S+)"
+> }
+> ```
 
 ## CLI alternative
 
@@ -57,3 +70,4 @@ At the prompt, type `test\fake_simulator.bat` for the simulator and paste scene 
 | `warnings_at` | list | `[]` | step indices that emit `[WARNING]` |
 | `errors_at` | list | `[]` | step indices that emit `[ERROR]` |
 | `fail_at` | int | `null` | step index after which to exit 1 |
+| `eta_per_step` | int | 1 | minutes of virtual time per step; drives the `eta: XhYm` token on every step line |

@@ -28,7 +28,12 @@ except ImportError:  # graceful: TopBar shows a hint instead of stats
     psutil = None
     HAS_PSUTIL = False
 
-from simulation import Simulator, load_config, profile_name, profile_supports_mpi, profile_step_marker
+import re
+
+from simulation import (
+    Simulator, load_config,
+    profile_name, profile_supports_mpi, profile_step_marker, profile_eta_pattern,
+)
 
 
 # Lifecycle states a queued entry passes through.
@@ -65,6 +70,7 @@ QUEUE_COLS = [
     ("Rmv", 5),
     ("Status", 10),
     ("Time", 10),
+    ("ETA", 8),
     ("Warnings", 9),
     ("Errors", 7),
 ]
@@ -161,6 +167,9 @@ class SceneEntry:
     elapsed: Optional[int] = None
     warnings: int = 0
     errors: int = 0
+    # ETA token extracted from the most recent step line (e.g. '7h57m',
+    # '<1m'). Profile must define eta_pattern to enable extraction.
+    eta: Optional[str] = None
     # Captured (line, kind) pairs for this case. The Running tab shows the
     # live unified stream; this buffer feeds the per-case tab a user can
     # pop open from the Setup queue to look at one case in isolation.
@@ -520,6 +529,7 @@ class BatchSimuApp(App):
                 self._fmt_bool(e.remove_output),
                 status_display(e),
                 self._fmt_time(e.elapsed),
+                e.eta or "-",
                 str(e.warnings),
                 str(e.errors),
             ]
@@ -1146,9 +1156,13 @@ class BatchSimuApp(App):
     def _mark_status(self, entry: SceneEntry, status: str):
         """Update the entry's status field and repaint the queue table.
 
-        Called from the worker thread via call_from_thread.
+        Called from the worker thread via call_from_thread. ETA is only
+        meaningful while a case is actively running, so any non-RUNNING
+        transition also clears the cached ETA.
         """
         entry.status = status
+        if status != STATUS_RUNNING:
+            entry.eta = None
         self.refresh_scene_queue()
 
     @work(thread=True, exclusive=True)
@@ -1231,17 +1245,28 @@ class BatchSimuApp(App):
                     continue
 
                 # Update step_marker for the current case's exe
-                self.current_step_marker = profile_step_marker(sim.identify_profile(entry.exe_path))
+                profile = sim.identify_profile(entry.exe_path)
+                self.current_step_marker = profile_step_marker(profile)
+                eta_pat_str = profile_eta_pattern(profile)
+                eta_re = re.compile(eta_pat_str) if eta_pat_str else None
 
                 self.process_holder.clear()
 
-                # Reset the per-case log buffer so a re-run via START or
-                # RESUME doesn't append onto the previous run's output.
+                # Reset the per-case log buffer + ETA so a re-run via START
+                # or RESUME doesn't carry over the previous run's state.
                 entry.log_buffer = []
+                entry.eta = None
 
-                def on_line(line, kind, _entry=entry):
+                def on_line(line, kind, _entry=entry, _eta_re=eta_re):
                     _entry.log_buffer.append((line, kind))
                     self.call_from_thread(self.log_line, line, kind)
+                    if kind == "step" and _eta_re is not None:
+                        m = _eta_re.search(line)
+                        if m:
+                            new_eta = m.group(1)
+                            if new_eta != _entry.eta:
+                                _entry.eta = new_eta
+                                self.call_from_thread(self.refresh_scene_queue)
 
                 try:
                     result = sim.run_case(

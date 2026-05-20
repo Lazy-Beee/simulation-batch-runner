@@ -10,7 +10,8 @@
       "supports_mpi": false,
       "step_marker": "[step]",
       "default_omp": false,
-      "default_mpi": false
+      "default_mpi": false,
+      "eta_pattern": "eta:\\s*(\\S+)"
     }
   ],
   "defaults": {

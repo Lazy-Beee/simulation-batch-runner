@@ -57,7 +57,7 @@ ROW_STYLE_BY_STATUS = {
 # Single Setup queue table now also carries result columns (formerly the Done tab).
 QUEUE_COLS = [
     ("#", 4),
-    ("Exe", 22),
+    ("Simulator", 22),
     ("Scene", 26),
     ("OMP", 5),
     ("MPI", 5),
@@ -203,15 +203,29 @@ class BatchSimuApp(App):
 
     /* Setup tab: flat layout - top widgets + scene_queue (1fr) + bottom widgets.
        scene_queue is the only fr-sized child, so it absorbs all remaining
-       vertical space inside setup_panel. */
-    #setup_panel { height: 1fr; }
-    #scene_queue { height: 1fr; border: tall $panel; }
+       vertical space inside setup_panel. Left/right padding keeps text,
+       buttons, and the progress bar off the tab edges. */
+    #setup_panel { height: 1fr; padding: 0 1; }
+    #scene_queue { height: 1fr; border: solid $accent; }
 
     .row { width: 100%; height: 3; align: left middle; }
+    /* Breathing room between groups on the Queue tab. Sub-labels like
+       sim_type_label / drag_target_label hug their row above; the
+       queue table and the status line each get a break of their own.
+       The very first row (Simulator input) sits flush against the top
+       of the tab. */
+    #setup_panel > .row { margin-top: 1; }
+    #setup_panel > #simulator_row { margin-top: 0; }
+    #setup_panel > #status_label { margin-top: 1; }
     Input { width: 1fr; }
     .narrow { width: 8; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
+    /* Pad "Simulator:" / "Scene:" labels to the same width so the two
+       Input fields start at the same column, and emphasise them. */
+    .field_label { width: 11; text-style: bold; }
+    /* Breathing room between the progress bar and the bottom of the tab. */
+    #progress { margin-bottom: 1; }
 
     /* Vertically center short widgets so they line up with Input/Button */
     .row > Label, .row > Switch {
@@ -230,7 +244,9 @@ class BatchSimuApp(App):
     /* Inside a Horizontal with the Copy button - share the row. */
     #current_stats_label { width: 1fr; }
 
-    #drag_target_label { color: white; }
+    /* Sub-labels for the Simulator / Scene rows: dimmed so they read as
+       hints rather than primary content. */
+    #sim_type_label, #drag_target_label { color: $text-muted; }
 
     #clear_exe_btn, #clear_scene_btn { width: 9; min-width: 9; }
     /* Compact button - 1 line, no border/padding so it lines up with the
@@ -243,6 +259,7 @@ class BatchSimuApp(App):
     }
 
     #log_panel { height: 1fr; border: solid $accent; }
+    .case_log_panel { height: 1fr; border: solid $accent; }
     #done_table { height: 1fr; }
 
     #current_case_label, #current_step_label, #current_stats_label {
@@ -251,9 +268,20 @@ class BatchSimuApp(App):
     /* Compact 1-line toolbar (stats + Copy button) so the three Running
        header lines stay equal height and visually aligned. */
     #running_toolbar { height: 1; }
-    /* Case-tab header lines also sit on single rows, alongside Copy. */
+    /* Case-tab header mirrors the Running tab: case label (accent bold) +
+       exe label (plain) + stats row with Copy button, each on one line. */
+    /* Case-tab row 1 hosts the Close button next to the case-name label. */
+    .case_tab_case_label { width: 1fr; padding: 0 1; color: $accent; text-style: bold; }
+    .case_tab_exe_label { width: 100%; padding: 0 1; }
     .case_tab_header { width: 1fr; padding: 0 1; }
     .case_tab_toolbar_row { height: 1; }
+    /* Compact Close button - same style as the Copy button. */
+    .close_log_btn {
+        width: 9; min-width: 9;
+        height: 1; min-height: 1;
+        padding: 0;
+        border: none;
+    }
     #current_case_label { color: $accent; text-style: bold; }
 
     #summary_label { padding: 1; text-style: bold; }
@@ -272,7 +300,7 @@ class BatchSimuApp(App):
         Binding("ctrl+x", "stop", "Stop", priority=True, show=False),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+q", "quit", "Quit", priority=True),
-        Binding("f1", "show_tab('setup')", "Setup"),
+        Binding("f1", "show_tab('setup')", "Queue"),
         Binding("f2", "show_tab('running')", "Running"),
         Binding("ctrl+w", "close_tab", "Close case tab", show=False),
     ]
@@ -307,10 +335,10 @@ class BatchSimuApp(App):
     def compose(self) -> ComposeResult:
         yield TopBar()
         with TabbedContent(initial="setup"):
-            with TabPane("Setup", id="setup"):
+            with TabPane("Queue", id="setup"):
                 with Vertical(id="setup_panel"):
-                    with Horizontal(classes="row"):
-                        yield Label("Simulator:")
+                    with Horizontal(id="simulator_row", classes="row"):
+                        yield Label("Simulator:", classes="field_label")
                         yield Input(
                             value=self.simulator.default_exe,
                             id="exe_input",
@@ -320,7 +348,7 @@ class BatchSimuApp(App):
                     yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
 
                     with Horizontal(classes="row"):
-                        yield Label("Scene:")
+                        yield Label("Scene:", classes="field_label")
                         yield Input(
                             id="add_file_input",
                             placeholder="drag scene file(s) in or paste; Enter adds them with the settings below",
@@ -458,19 +486,19 @@ class BatchSimuApp(App):
             return "-"
         return str(datetime.timedelta(seconds=elapsed))
 
-    def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str]:
-        """Two-line header for the case-log tab: identity on top, results below."""
-        line1 = (
-            f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"
-            f"  |  Exe: {os.path.basename(entry.exe_path)}"
-        )
-        line2 = (
+    def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str, str]:
+        """Three-line header for the case-log tab, mirroring the Running
+        tab's case / step / stats stack: case name (accent bold), exe
+        basename, then a stats row that pairs with a Copy button."""
+        case_line = f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"
+        exe_line = f"Simulator: {os.path.basename(entry.exe_path)}"
+        stats_line = (
             f"Status: {status_display(entry)}"
             f"  |  Time: {self._fmt_time(entry.elapsed)}"
             f"  |  Warnings: {entry.warnings}"
             f"  |  Errors: {entry.errors}"
         )
-        return line1, line2
+        return case_line, exe_line, stats_line
 
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
@@ -511,7 +539,6 @@ class BatchSimuApp(App):
         self.query_one("#sim_type_label", Static).update(format_sim_type_text(self.simulator, exe_path))
         supports = profile_supports_mpi(profile)
         mpi_switch = self.query_one("#mpi_switch", Switch)
-        mpi_input = self.query_one("#mpi_input", Input)
         omp_switch = self.query_one("#omp_switch", Switch)
 
         # Only re-apply OMP/MPI switch defaults when the matched profile
@@ -528,7 +555,25 @@ class BatchSimuApp(App):
         if not supports:
             mpi_switch.value = False
         mpi_switch.disabled = not supports
-        mpi_input.disabled = not supports
+        self._sync_input_enabled_state()
+
+    def _sync_input_enabled_state(self):
+        """Gray out the OMP / MPI numeric Input whenever its switch is off
+        (or the profile forbids MPI). The user can still read the cached
+        value but the visual cue makes clear that it won't take effect."""
+        omp_input = self.query_one("#omp_input", Input)
+        omp_input.disabled = not self.query_one("#omp_switch", Switch).value
+        mpi_input = self.query_one("#mpi_input", Input)
+        profile = self.simulator.identify_profile(self.query_one("#exe_input", Input).value)
+        mpi_input.disabled = (
+            not profile_supports_mpi(profile)
+            or not self.query_one("#mpi_switch", Switch).value
+        )
+
+    @on(Switch.Changed, "#omp_switch")
+    @on(Switch.Changed, "#mpi_switch")
+    def on_omp_mpi_switch_changed(self):
+        self._sync_input_enabled_state()
 
     def switch_tab(self, tab_id: str):
         """Activate a tab by id.
@@ -738,15 +783,23 @@ class BatchSimuApp(App):
             pass
 
         case_name = self.simulator.case_name_from_path(entry.scene_path)
-        log_widget = RichLog(highlight=False, markup=True, wrap=False, max_lines=20000)
-        line1, line2 = self._format_case_tab_header(entry)
-        header_row1 = Static(line1, classes="case_tab_header")
-        header_row2 = Horizontal(
-            Static(line2, classes="case_tab_header"),
+        log_widget = RichLog(
+            highlight=False, markup=True, wrap=False, max_lines=20000,
+            classes="case_log_panel",
+        )
+        case_line, exe_line, stats_line = self._format_case_tab_header(entry)
+        header_case = Horizontal(
+            Static(case_line, classes="case_tab_case_label"),
+            Button("Close", classes="close_log_btn"),
+            classes="case_tab_toolbar_row",
+        )
+        header_exe = Static(exe_line, classes="case_tab_exe_label")
+        header_stats = Horizontal(
+            Static(stats_line, classes="case_tab_header"),
             Button("Copy", classes="copy_log_btn"),
             classes="case_tab_toolbar_row",
         )
-        pane = TabPane(case_name, header_row1, header_row2, log_widget, id=tab_id)
+        pane = TabPane(case_name, header_case, header_exe, header_stats, log_widget, id=tab_id)
         await tc.add_pane(pane)
         # Replay the buffered lines into the new widget
         for line, kind in entry.log_buffer:
@@ -973,6 +1026,10 @@ class BatchSimuApp(App):
     @on(Button.Pressed, ".copy_log_btn")
     def on_copy_log(self):
         self.action_copy_log()
+
+    @on(Button.Pressed, ".close_log_btn")
+    async def on_close_log(self):
+        await self.action_close_tab()
 
     def action_show_tab(self, tab_id: str):
         self.switch_tab(tab_id)

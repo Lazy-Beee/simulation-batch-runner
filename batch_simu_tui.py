@@ -165,6 +165,11 @@ class SceneEntry:
     # live unified stream; this buffer feeds the per-case tab a user can
     # pop open from the Setup queue to look at one case in isolation.
     log_buffer: list = field(default_factory=list)
+    # Per-case private copy of the simulator exe, taken at the moment the
+    # entry was added to the queue (see _add_from_input). Each entry owns
+    # its own copy so re-compiling the source exe mid-batch only affects
+    # cases added after the rebuild. None means no copy was prepared yet.
+    batch_exe_path: Optional[str] = None
 
 
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
@@ -277,8 +282,6 @@ class BatchSimuApp(App):
         self.config = load_config()
         self.simulator = Simulator(self.config)
         self.scene_entries: list[SceneEntry] = []
-        # exe_path -> prepared batch_exe copy. Reused across cases that share an exe.
-        self._prepared_exes: dict[str, str] = {}
         self.process_holder: list = []
         self.stop_requested = False
         self.force_stopped_current = False   # set by FORCE STOP; consumed by worker
@@ -658,6 +661,21 @@ class BatchSimuApp(App):
         zip_out = self.query_one("#zip_switch", Switch).value
         rm_out = self.query_one("#remove_switch", Switch).value
 
+        # All entries from this one Add call share a single snapshot of the
+        # simulator exe - the user can't recompile in the middle of a single
+        # synchronous Add. Snapshots only diverge across separate Add calls,
+        # which is enough granularity to handle "rebuild mid-batch then add
+        # more cases" correctly without bloating disk for batch adds.
+        if not os.path.isfile(exe_path):
+            self.log_line(f"Simulator exe not found: {exe_path}", "error")
+            return
+        try:
+            shared_batch_exe = self.simulator.prepare_exe(exe_path)
+        except Exception as e:
+            self.log_line(f"Failed to prepare exe: {e}", "error")
+            return
+
+        added = 0
         for p in paths:
             p = strip_quotes(p)
             entry = SceneEntry(
@@ -667,12 +685,23 @@ class BatchSimuApp(App):
                 mpi_ranks=mpi,
                 zip_output=zip_out,
                 remove_output=rm_out,
+                batch_exe_path=shared_batch_exe,
             )
             self.scene_entries.append(entry)
+            added += 1
             if not os.path.exists(p):
                 self.log_line(f"Warning: scene file not found: {p}", "warning")
 
-        self.refresh_scene_queue()
+        if added == 0:
+            # No entries committed (defensive - shouldn't happen, paths
+            # parsing above already returns early on empty input); roll
+            # back the orphan copy so it doesn't leak.
+            try:
+                self.simulator.cleanup_exe(shared_batch_exe)
+            except Exception:
+                pass
+        else:
+            self.refresh_scene_queue()
         inp.value = ""
         inp.focus()
 
@@ -761,9 +790,26 @@ class BatchSimuApp(App):
                 "warning",
             )
             return
+        self._cleanup_entry_exe(target)
         self.scene_entries.pop(idx)
         self.refresh_scene_queue()
         self.log_line(f"Removed: {target.scene_path}", "info")
+
+    def _cleanup_entry_exe(self, entry: SceneEntry):
+        """Drop this entry's reference to its batch_exe copy, and delete
+        the copy on disk only if no other entry still references it.
+        Idempotent; used by on_remove / on_reset / on_unmount."""
+        path = entry.batch_exe_path
+        if not path:
+            return
+        entry.batch_exe_path = None
+        # A batch-Add of N scenes shares one copy; only the last drop deletes.
+        if any(e.batch_exe_path == path for e in self.scene_entries):
+            return
+        try:
+            self.simulator.cleanup_exe(path)
+        except Exception:
+            pass
 
     @on(Button.Pressed, "#up_btn")
     def on_move_up(self):
@@ -806,13 +852,10 @@ class BatchSimuApp(App):
         if self.batch_running:
             self.log_line("Cannot reset while a batch is running. Stop first.", "warning")
             return
-        # Best-effort cleanup of any leftover prepared exes
-        for batch_exe in list(self._prepared_exes.values()):
-            try:
-                self.simulator.cleanup_exe(batch_exe)
-            except Exception:
-                pass
-        self._prepared_exes = {}
+        # Best-effort cleanup of every entry's private exe copy before
+        # the queue is wiped.
+        for entry in self.scene_entries:
+            self._cleanup_entry_exe(entry)
         # Close any per-case tabs the user had opened
         await self._close_all_case_tabs()
         # Wipe queue
@@ -1009,15 +1052,17 @@ class BatchSimuApp(App):
             self.log_line("No pending entries to run.", "warning")
             return
 
-        # Validate exes for pending entries
-        unique_exes = []
-        for e in pending:
-            if e.exe_path not in unique_exes:
-                unique_exes.append(e.exe_path)
-        missing = [x for x in unique_exes if not os.path.isfile(x)]
+        # Validate each pending entry still has its private batch_exe copy.
+        # The source exe may have been moved or deleted since Add - we don't
+        # need it anymore (the copy is the source of truth at run time) but
+        # the copy itself has to exist.
+        missing = [e for e in pending if not e.batch_exe_path or not os.path.isfile(e.batch_exe_path)]
         if missing:
-            for m in missing:
-                self.log_line(f"Simulator exe not found: {m}", "error")
+            for e in missing:
+                self.log_line(
+                    f"Prepared exe missing for '{e.scene_path}': {e.batch_exe_path}",
+                    "error",
+                )
             return
 
         self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
@@ -1098,19 +1143,23 @@ class BatchSimuApp(App):
                 # Per-case OMP env (None unsets)
                 sim.set_omp_env(entry.omp_threads)
 
-                # Per-case prepared exe (cached per source exe path)
-                if entry.exe_path not in self._prepared_exes:
-                    try:
-                        self._prepared_exes[entry.exe_path] = sim.prepare_exe(entry.exe_path)
-                    except Exception as e:
-                        self.call_from_thread(self.log_line, f"Failed to prepare exe: {e}", "error")
-                        entry.elapsed = -1
-                        total_failures += 1
-                        self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
-                        time_costs.append(-1)
-                        self.current_entry = None
-                        continue
-                batch_exe = self._prepared_exes[entry.exe_path]
+                # Each entry owns a private copy prepared at Add time. If
+                # the copy was somehow deleted (e.g. user wiped the folder
+                # between adds and runs), skip the case rather than fall
+                # back to the source exe.
+                batch_exe = entry.batch_exe_path
+                if not batch_exe or not os.path.isfile(batch_exe):
+                    self.call_from_thread(
+                        self.log_line,
+                        f"Prepared exe missing for '{case_name}': {batch_exe}",
+                        "error",
+                    )
+                    entry.elapsed = -1
+                    total_failures += 1
+                    self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
+                    time_costs.append(-1)
+                    self.current_entry = None
+                    continue
 
                 # Update step_marker for the current case's exe
                 self.current_step_marker = profile_step_marker(sim.identify_profile(entry.exe_path))
@@ -1193,10 +1242,10 @@ class BatchSimuApp(App):
             sim.info("All done", tag="Batch")
 
         finally:
-            for batch_exe in list(self._prepared_exes.values()):
-                if sim.cleanup_exe(batch_exe):
-                    self.call_from_thread(self.log_line, f"Cleaned up: {batch_exe}", "info")
-            self._prepared_exes = {}
+            # Per-case batch_exe copies persist past batch end so START /
+            # RESUME can re-run the same entries with their original exe
+            # snapshot. They get cleaned up when the entry is Removed,
+            # on Reset, or on app unmount.
             self.batch_running = False
             self.current_entry = None
             self.call_from_thread(self.reset_run_controls)
@@ -1209,11 +1258,8 @@ class BatchSimuApp(App):
             )
 
     def on_unmount(self):
-        for batch_exe in list(self._prepared_exes.values()):
-            try:
-                self.simulator.cleanup_exe(batch_exe)
-            except Exception:
-                pass
+        for entry in self.scene_entries:
+            self._cleanup_entry_exe(entry)
 
 
 def main():

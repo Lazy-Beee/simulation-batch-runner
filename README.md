@@ -60,8 +60,8 @@ Additionally, **per-case log tabs** can be popped open from the Setup queue (see
 
 ### Setup workflow
 
-1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable.
-2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue.
+1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable. The **Clear** button on the right empties the field and re-focuses it.
+2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
 3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch. These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
 4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items.
 5. **Queue table** — 11 columns: `# / Exe / Scene / OMP / MPI / Zip / Rmv / Status / Time / Warnings / Errors`. Each row's background reflects its status:
@@ -87,9 +87,9 @@ Additionally, **per-case log tabs** can be popped open from the Setup queue (see
 
 ### Drag-and-drop
 
-Drag a file from your file manager onto the terminal:
-- if the **Simulator** input has focus, it replaces that path;
-- otherwise the path lands in the **Scene** input, ready to Enter.
+Drag a file from your file manager onto the terminal. The drop lands in the **Simulator** input or the **Scene** input depending on which one you last clicked / Tab-focused — the current target is shown under the Scene input as `Drag target: Simulator / Scene`. Click the desired field once before dragging to switch the target; the **Clear** button next to each input also re-focuses it (so pressing Clear then dragging will land in that field).
+
+Mouse-position routing isn't possible because Windows OLE drag-drop is modal: the terminal doesn't receive mouse-move events while you're holding the file, so the app can't see where the drop lands.
 
 Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 
@@ -98,9 +98,9 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | Key | Action |
 |---|---|
 | `Ctrl+S` | START |
-| `Ctrl+X` | STOP (graceful) |
+| `Ctrl+X` | STOP (graceful) — hidden from Footer to keep key order stable while an Input is focused |
 | `Ctrl+L` | Clear log |
-| `Ctrl+W` | Close current case tab (Setup / Running are pinned) |
+| `Ctrl+W` | Close current case tab (Setup / Running are pinned) — hidden from Footer; inside an Input it's the Input's own delete-word |
 | `Ctrl+Q` | Quit |
 | `F1` / `F2` | Jump to Setup / Running |
 

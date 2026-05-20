@@ -177,6 +177,11 @@ def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
     return f"Type: {name}"
 
 
+def format_drag_target_text(target_id: str) -> str:
+    name = "Simulator" if target_id == "exe_input" else "Scene"
+    return f"Drag target: {name}  (click a field to switch)"
+
+
 def strip_quotes(s: str) -> str:
     """Drag-and-drop on Windows Terminal often inserts quoted paths; strip outer quotes."""
     s = s.strip()
@@ -214,9 +219,13 @@ class BatchSimuApp(App):
 
     #sim_type_label, #status_label,
     #current_case_label, #current_step_label, #current_stats_label,
-    #summary_label {
+    #summary_label, #drag_target_label {
         width: 100%;
     }
+
+    #drag_target_label { color: white; }
+
+    #clear_exe_btn, #clear_scene_btn { width: 9; min-width: 9; }
 
     #log_panel { height: 1fr; border: solid $accent; }
     #done_table { height: 1fr; }
@@ -231,12 +240,20 @@ class BatchSimuApp(App):
 
     BINDINGS = [
         Binding("ctrl+s", "start", "Start", priority=True),
-        Binding("ctrl+x", "stop", "Stop", priority=True),
+        # ctrl+x and ctrl+w collide with Input's built-in 'cut' / 'delete-word'
+        # bindings. show=False hides them from the Footer so the Footer key
+        # order stays stable when an Input is focused (otherwise these
+        # bindings get inserted at the Input.BINDINGS slot positions, which
+        # are interleaved among Input's own keys). Stop keeps priority=True
+        # so ctrl+x still fires from inside an Input; close_tab is left
+        # non-priority on purpose so ctrl+w inside an Input remains
+        # delete-left-word.
+        Binding("ctrl+x", "stop", "Stop", priority=True, show=False),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("f1", "show_tab('setup')", "Setup"),
         Binding("f2", "show_tab('running')", "Running"),
-        Binding("ctrl+w", "close_tab", "Close case tab"),
+        Binding("ctrl+w", "close_tab", "Close case tab", show=False),
     ]
 
     def __init__(self):
@@ -259,6 +276,15 @@ class BatchSimuApp(App):
         # OMP/MPI switches when the matched profile actually transitions.
         self._last_profile_name: str | None = None
 
+        # Which Input drag-and-drop / paste content lands in. Updated whenever
+        # the user focuses one of the two inputs (mouse click or Tab key).
+        # We track this explicitly instead of reading App.focused at paste
+        # time because OLE drag-drop is modal: switching to the file manager
+        # to grab a file clears App focus, and the bracketed-paste event
+        # arrives without restoring it. mouse_over is also stale at that
+        # point (no MouseMove events are delivered during the drag).
+        self._paste_target_id: str = "add_file_input"
+
     def compose(self) -> ComposeResult:
         yield TopBar()
         with TabbedContent(initial="setup"):
@@ -271,6 +297,7 @@ class BatchSimuApp(App):
                             id="exe_input",
                             placeholder="path to simulator exe (drag a file in or paste)",
                         )
+                        yield Button("Clear", id="clear_exe_btn")
                     yield Static(format_sim_type_text(self.simulator, self.simulator.default_exe), id="sim_type_label")
 
                     with Horizontal(classes="row"):
@@ -279,6 +306,8 @@ class BatchSimuApp(App):
                             id="add_file_input",
                             placeholder="drag scene file(s) in or paste; Enter adds them with the settings below",
                         )
+                        yield Button("Clear", id="clear_scene_btn")
+                    yield Static(format_drag_target_text(self._paste_target_id), id="drag_target_label")
 
                     with Horizontal(classes="row"):
                         yield Switch(value=False, id="omp_switch")
@@ -546,6 +575,18 @@ class BatchSimuApp(App):
     def on_add_submit(self):
         self._add_from_input()
 
+    @on(Button.Pressed, "#clear_exe_btn")
+    def on_clear_exe(self):
+        exe_input = self.query_one("#exe_input", Input)
+        exe_input.value = ""
+        exe_input.focus()
+
+    @on(Button.Pressed, "#clear_scene_btn")
+    def on_clear_scene(self):
+        scene_input = self.query_one("#add_file_input", Input)
+        scene_input.value = ""
+        scene_input.focus()
+
     def _read_int(self, value: str, fallback: int) -> int:
         v = value.strip()
         if not v:
@@ -762,8 +803,14 @@ class BatchSimuApp(App):
 
     def on_paste(self, event: events.Paste):
         """Drag-and-drop into a Textual app comes through as a bracketed paste.
-        If a target Input is focused, replace its value; otherwise route to the
-        scene input so dragging a scene file anywhere on the Setup tab works."""
+
+        Route to whichever of the two inputs was most recently focused (see
+        on_descendant_focus). We can't use mouse position - OLE drag-drop on
+        Windows is modal, so no MouseMove events arrive between leaving the
+        terminal to grab a file and the drop landing back - and we can't
+        trust self.focused either, because alt-tabbing out and back can
+        clear it. Mirroring the last clicked/Tab-selected input is the
+        sturdiest mapping under those constraints."""
         if self.batch_running:
             return
         text = event.text or ""
@@ -771,16 +818,36 @@ class BatchSimuApp(App):
         text = text.replace("\r", "").replace("\n", " ").strip()
         if not text:
             return
-        focused = self.focused
-        if isinstance(focused, Input) and focused.id == "exe_input":
-            focused.value = strip_quotes(text)
-            event.stop()
-            return
-        # Default: route to scene input (works whether or not it had focus)
-        add_input = self.query_one("#add_file_input", Input)
-        add_input.value = text  # keep quotes; _add_from_input uses shlex.split
-        add_input.focus()
+
+        if self._paste_target_id == "exe_input":
+            self.query_one("#exe_input", Input).value = strip_quotes(text)
+        else:  # add_file_input - keep quotes; _add_from_input uses shlex.split
+            scene_input = self.query_one("#add_file_input", Input)
+            scene_input.value = text
+            scene_input.focus()
         event.stop()
+
+    def on_descendant_focus(self, event: events.DescendantFocus):
+        """Track which of our two routable inputs was last focused so the next
+        paste / drag-drop lands there. Triggered by both mouse click and Tab
+        key navigation. Other focusable widgets (switches, buttons, the
+        OMP/MPI inputs) are ignored - they don't change the paste target."""
+        w = event.control
+        if isinstance(w, Input) and w.id in ("exe_input", "add_file_input"):
+            self._set_paste_target(w.id)
+
+    def _set_paste_target(self, target_id: str):
+        if target_id == self._paste_target_id:
+            return
+        self._paste_target_id = target_id
+        try:
+            self.query_one("#drag_target_label", Static).update(
+                format_drag_target_text(target_id)
+            )
+        except Exception:
+            # Label may not exist yet during early mount; the initial render
+            # already shows the default target.
+            pass
 
     def action_clear_log(self):
         self.query_one("#log_panel", RichLog).clear()

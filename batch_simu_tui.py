@@ -184,11 +184,18 @@ class SceneEntry:
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
     profile = simulator.identify_profile(exe_path)
     if profile is None:
-        return "Type: unknown"
-    name = profile_name(profile)
-    if not profile_supports_mpi(profile):
-        return f"Type: {name} (single-process only - MPI not supported)"
-    return f"Type: {name}"
+        base = "Type: unknown"
+    else:
+        name = profile_name(profile)
+        if not profile_supports_mpi(profile):
+            base = f"Type: {name} (single-process only - MPI not supported)"
+        else:
+            base = f"Type: {name}"
+    # Flag a non-empty path that doesn't resolve to a file on disk. Empty
+    # input stays clean (the user hasn't entered anything yet).
+    if exe_path and not os.path.isfile(exe_path):
+        base += "  [red](file not found)[/red]"
+    return base
 
 
 def format_drag_target_text(target_id: str) -> str:

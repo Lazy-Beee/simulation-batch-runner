@@ -44,7 +44,7 @@ Generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNI
 ## CLI alternative
 
 ```powershell
-python batch_simu.py
+python batch_simu_cli.py
 ```
 At the prompt, type `test\fake_simulator.bat` for the simulator and paste scene paths separated by spaces.
 

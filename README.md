@@ -6,7 +6,7 @@ Simulator-specific behavior (display name, MPI capability, step-line marker, def
 
 Two frontends share the same core (`simulation.py`):
 
-- **CLI** (`batch_simu.py`) — interactive prompts, suitable for SSH / minimal envs. One configuration is applied to every case in the prompt batch.
+- **CLI** (`batch_simu_cli.py`) — interactive prompts, suitable for SSH / minimal envs. One configuration is applied to every case in the prompt batch.
 - **TUI** (`batch_simu_tui.py`) — [Textual](https://textual.textualize.io/) terminal UI with **per-case** OMP / MPI / Zip / Remove settings, status-colored queue table, live log, CPU/Memory monitor, and per-case log tabs you can pop open on demand.
 
 ## Setup
@@ -113,7 +113,7 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 ## Usage — CLI
 
 ```powershell
-python batch_simu.py [--no-zip] [--keep-output]
+python batch_simu_cli.py [--no-zip] [--keep-output]
 ```
 
 The script prompts for:

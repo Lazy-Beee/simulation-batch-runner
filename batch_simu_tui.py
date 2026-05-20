@@ -218,14 +218,24 @@ class BatchSimuApp(App):
     #bottom_filler { width: 1fr; }
 
     #sim_type_label, #status_label,
-    #current_case_label, #current_step_label, #current_stats_label,
+    #current_case_label, #current_step_label,
     #summary_label, #drag_target_label {
         width: 100%;
     }
+    /* Inside a Horizontal with the Copy button - share the row. */
+    #current_stats_label { width: 1fr; }
 
     #drag_target_label { color: white; }
 
     #clear_exe_btn, #clear_scene_btn { width: 9; min-width: 9; }
+    /* Compact button - 1 line, no border/padding so it lines up with the
+       Static labels on either side inside a height:1 toolbar row. */
+    .copy_log_btn {
+        width: 9; min-width: 9;
+        height: 1; min-height: 1;
+        padding: 0;
+        border: none;
+    }
 
     #log_panel { height: 1fr; border: solid $accent; }
     #done_table { height: 1fr; }
@@ -233,6 +243,12 @@ class BatchSimuApp(App):
     #current_case_label, #current_step_label, #current_stats_label {
         padding: 0 1;
     }
+    /* Compact 1-line toolbar (stats + Copy button) so the three Running
+       header lines stay equal height and visually aligned. */
+    #running_toolbar { height: 1; }
+    /* Case-tab header lines also sit on single rows, alongside Copy. */
+    .case_tab_header { width: 1fr; padding: 0 1; }
+    .case_tab_toolbar_row { height: 1; }
     #current_case_label { color: $accent; text-style: bold; }
 
     #summary_label { padding: 1; text-style: bold; }
@@ -350,7 +366,9 @@ class BatchSimuApp(App):
                 with Vertical():
                     yield Static("No case running", id="current_case_label")
                     yield Static("Step: -", id="current_step_label")
-                    yield Static("Elapsed: - | Warnings: 0 | Errors: 0", id="current_stats_label")
+                    with Horizontal(id="running_toolbar"):
+                        yield Static("Elapsed: - | Warnings: 0 | Errors: 0", id="current_stats_label")
+                        yield Button("Copy", classes="copy_log_btn")
                     yield RichLog(
                         id="log_panel",
                         highlight=False,
@@ -436,6 +454,20 @@ class BatchSimuApp(App):
         if elapsed is None or elapsed < 0:
             return "-"
         return str(datetime.timedelta(seconds=elapsed))
+
+    def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str]:
+        """Two-line header for the case-log tab: identity on top, results below."""
+        line1 = (
+            f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"
+            f"  |  Exe: {os.path.basename(entry.exe_path)}"
+        )
+        line2 = (
+            f"Status: {status_display(entry)}"
+            f"  |  Time: {self._fmt_time(entry.elapsed)}"
+            f"  |  Warnings: {entry.warnings}"
+            f"  |  Errors: {entry.errors}"
+        )
+        return line1, line2
 
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
@@ -678,7 +710,14 @@ class BatchSimuApp(App):
 
         case_name = self.simulator.case_name_from_path(entry.scene_path)
         log_widget = RichLog(highlight=False, markup=True, wrap=False, max_lines=20000)
-        pane = TabPane(case_name, log_widget, id=tab_id)
+        line1, line2 = self._format_case_tab_header(entry)
+        header_row1 = Static(line1, classes="case_tab_header")
+        header_row2 = Horizontal(
+            Static(line2, classes="case_tab_header"),
+            Button("Copy", classes="copy_log_btn"),
+            classes="case_tab_toolbar_row",
+        )
+        pane = TabPane(case_name, header_row1, header_row2, log_widget, id=tab_id)
         await tc.add_pane(pane)
         # Replay the buffered lines into the new widget
         for line, kind in entry.log_buffer:
@@ -851,6 +890,46 @@ class BatchSimuApp(App):
 
     def action_clear_log(self):
         self.query_one("#log_panel", RichLog).clear()
+
+    def action_copy_log(self):
+        """Copy the active tab's RichLog content to the system clipboard.
+
+        Driven by the Copy button in Running and case tabs. Textual's
+        click-drag selection works for Static/Label but not for RichLog
+        (mouse-down is eaten by the scrollable container), so this gives
+        the user a one-shot 'copy everything in this log' path. The
+        terminal's own Shift+drag selection is still the finer-grained
+        alternative."""
+        log_widget = self._active_log_widget()
+        if log_widget is None:
+            self.notify("Switch to Running or a case tab first.", severity="warning")
+            return
+        lines = [strip.text for strip in log_widget.lines]
+        if not lines:
+            self.notify("Log is empty.", severity="information")
+            return
+        text = "\n".join(lines).rstrip() + "\n"
+        self.copy_to_clipboard(text)
+        self.notify(f"Copied {len(lines)} lines to clipboard.")
+
+    def _active_log_widget(self) -> Optional[RichLog]:
+        """Return the RichLog inside the currently active tab, or None for
+        tabs without one (Setup)."""
+        tc = self.query_one(TabbedContent)
+        active = tc.active
+        if not active or active == "setup":
+            return None
+        if active == "running":
+            return self.query_one("#log_panel", RichLog)
+        try:
+            pane = tc.get_pane(active)
+            return pane.query_one(RichLog)
+        except Exception:
+            return None
+
+    @on(Button.Pressed, ".copy_log_btn")
+    def on_copy_log(self):
+        self.action_copy_log()
 
     def action_show_tab(self, tab_id: str):
         self.switch_tab(tab_id)

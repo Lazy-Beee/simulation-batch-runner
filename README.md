@@ -11,6 +11,8 @@ Two frontends share the same core (`simulation.py`):
 
 ## Setup
 
+> **Prebuilt Windows x64 binaries** are attached to each [release](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest). If you only want to run, grab `batch_simu_tui.exe` (TUI) or `batch_simu_cli.exe` (CLI) plus `config.example.json` from the latest release, drop them in the same folder, copy the json to `config.json`, fill in your paths (step 2 below), and run. No Python install needed. To run from source instead, follow all three steps:
+
 1. Copy the config template:
    ```powershell
    Copy-Item config.example.json config.json
@@ -133,7 +135,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 
 ## How it works
 
-- The chosen simulator exe is copied to `<base>.batch<ext>` per unique source path (cached across cases that share an exe), so you can rebuild the original while a batch is in progress. Every copy is cleaned up at batch exit.
+- Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
 - `stdout` is streamed live and parsed for the matched profile's `step_marker`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
 - Telegram digest at batch end summarises per-case time costs and totals.
@@ -150,3 +152,20 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 ## Testing
 
 `test/` ships a fake simulator and sample scenes for exercising both frontends without a real simulator build. See [test/README.md](test/README.md).
+
+## Building binaries
+
+The Windows x64 binaries shipped with each release are built with PyInstaller (onefile mode). To reproduce locally:
+
+```powershell
+pip install pyinstaller
+.\build.bat
+```
+
+Outputs:
+- `dist\batch_simu_tui.exe` (~35 MB) — Textual TUI
+- `dist\batch_simu_cli.exe` (~12 MB) — interactive CLI
+
+The TUI command uses `--collect-submodules textual` because Textual lazy-loads widget modules via `__getattr__` (e.g. `textual.widgets._tab_pane`); without it the frozen exe fails at first widget access.
+
+`simulation.py:_app_root()` resolves `config.json` next to `sys.executable` when frozen, and next to `simulation.py` in dev mode, so the same code path covers both. Users must place `config.json` (copied from `config.example.json`) alongside the exe.

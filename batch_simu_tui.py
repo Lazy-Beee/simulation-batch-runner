@@ -946,8 +946,6 @@ class BatchSimuApp(App):
         trust self.focused either, because alt-tabbing out and back can
         clear it. Mirroring the last clicked/Tab-selected input is the
         sturdiest mapping under those constraints."""
-        if self.batch_running:
-            return
         text = event.text or ""
         # Normalize: terminals often append CR/LF and may wrap with quotes
         text = text.replace("\r", "").replace("\n", " ").strip()
@@ -1141,9 +1139,9 @@ class BatchSimuApp(App):
         self.query_one("#reset_btn", Button).disabled = True
         self.set_progress(0)
 
-        # Pass the FULL entry list so per-entry indices in status messages
-        # reflect their queue position; worker skips non-pending internally.
-        self._run_batch_worker(list(self.scene_entries))
+        # Worker reads self.scene_entries live so cases Added mid-batch are
+        # picked up too.
+        self._run_batch_worker()
 
     def _mark_status(self, entry: SceneEntry, status: str):
         """Update the entry's status field and repaint the queue table.
@@ -1154,31 +1152,43 @@ class BatchSimuApp(App):
         self.refresh_scene_queue()
 
     @work(thread=True, exclusive=True)
-    def _run_batch_worker(self, entries: list[SceneEntry]):
+    def _run_batch_worker(self):
         sim = self.simulator
-        total = len(entries)
         case_names: list[str] = []
         time_costs: list[int] = []
         total_warnings = 0
         total_errors = 0
         total_failures = 0
-        # Count only what we'll actually run, for the Telegram digest.
-        runnable = sum(1 for e in entries if e.status == STATUS_PENDING)
+        # Snapshot count for the start-of-batch Telegram digest only.
+        # The actual run loop reads self.scene_entries live so mid-batch
+        # Adds get processed too.
+        runnable = sum(1 for e in self.scene_entries if e.status == STATUS_PENDING)
+        total_initial = len(self.scene_entries)
 
         try:
             sim.info("Start processing", tag="Batch")
             sim.tg.queue_message("#Batch Batch settings:")
-            sim.tg.queue_message(f"Pending cases to run: {runnable} / {total}")
-            sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in entries if e.status == STATUS_PENDING})}")
+            sim.tg.queue_message(f"Pending cases to run: {runnable} / {total_initial}")
+            sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in self.scene_entries if e.status == STATUS_PENDING})}")
             sim.tg.send_telegram_message_batch()
 
-            for i, entry in enumerate(entries):
+            # Live cursor: each iteration re-reads len(self.scene_entries),
+            # so entries Added mid-batch extend this run instead of being
+            # deferred to the next START / RESUME. `i` stays 0-indexed to
+            # match the rest of the case-processing block below.
+            i = 0
+            while True:
                 if self.stop_requested:
                     self.call_from_thread(self.log_line, "--- Batch stopped by user ---", "warning")
                     break
+                if i >= len(self.scene_entries):
+                    break
+                entry = self.scene_entries[i]
                 # Resume support: skip anything that's already been processed.
                 if entry.status != STATUS_PENDING:
+                    i += 1
                     continue
+                total = len(self.scene_entries)
 
                 case_name = sim.case_name_from_path(entry.scene_path)
                 case_names.append(case_name)
@@ -1195,6 +1205,7 @@ class BatchSimuApp(App):
                     self.call_from_thread(self._mark_status, entry, STATUS_MISSING)
                     time_costs.append(-1)
                     self.current_entry = None
+                    i += 1
                     continue
 
                 # Per-case OMP env (None unsets)
@@ -1216,6 +1227,7 @@ class BatchSimuApp(App):
                     self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
                     time_costs.append(-1)
                     self.current_entry = None
+                    i += 1
                     continue
 
                 # Update step_marker for the current case's exe
@@ -1243,6 +1255,7 @@ class BatchSimuApp(App):
                     self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
                     time_costs.append(-1)
                     self.current_entry = None
+                    i += 1
                     continue
 
                 entry.returncode = result.returncode
@@ -1260,6 +1273,7 @@ class BatchSimuApp(App):
                     self.call_from_thread(self.finish_current_case)
                     self.call_from_thread(self._mark_status, entry, STATUS_STOPPED)
                     self.current_entry = None
+                    i += 1
                     continue
 
                 if result.returncode == 0:
@@ -1293,6 +1307,7 @@ class BatchSimuApp(App):
                     f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
                 )
                 self.current_entry = None
+                i += 1
 
             self.call_from_thread(self.set_progress, 100)
             sim.send_batch_report(case_names, time_costs, total_failures, total_errors, total_warnings)

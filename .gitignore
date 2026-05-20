@@ -2,5 +2,13 @@ config.json
 __pycache__/
 *.pyc
 
-# Per-case batch_exe copies created at queue Add time
+# Per-case batch_exe copies created at queue Add time. prepare_exe names
+# them <base>.batch<ext> on the first copy and <base>.batch.<n><ext> for
+# duplicates (so sim.batch.exe, sim.batch.1.exe, sim.batch.2.exe, ...).
+# The pattern below catches both.
 *.batch.*
+
+# PyInstaller artifacts (see build.bat)
+build/
+dist/
+*.spec

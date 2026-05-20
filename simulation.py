@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import json
 import time
 import shutil
@@ -12,7 +13,17 @@ from typing import NamedTuple, Callable, Optional, List
 
 import requests
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+
+def _app_root() -> Path:
+    """Where to look for config.json. A PyInstaller-frozen exe stores it
+    next to the exe itself; running from source stores it next to
+    simulation.py. sys.frozen is set to True by PyInstaller bootloaders."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+CONFIG_PATH = _app_root() / "config.json"
 
 
 def load_config():

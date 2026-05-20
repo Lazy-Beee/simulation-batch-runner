@@ -2,6 +2,5 @@ config.json
 __pycache__/
 *.pyc
 
-# Local-only replay logs (user-supplied, can be large)
-test/*.log
-test/*.txt
+# Per-case batch_exe copies created at queue Add time
+*.batch.*

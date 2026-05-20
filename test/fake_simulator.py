@@ -1,37 +1,17 @@
 """Fake simulator that mimics SPHSimulator / CAMMP stdout for manual TUI/CLI testing.
 
-Reads a JSON scene file with these optional keys (synthetic mode):
+Reads a JSON scene file with these optional keys:
     steps        int    number of simulation steps (default 10)
     step_time    float  seconds per step (default 0.2)
     warnings_at  list   step indices that emit a [WARNING] line (default [])
     errors_at    list   step indices that emit an [ERROR] line (default [])
     fail_at      int    step index after which to exit with code 1 (default null)
-
-Replay mode (use a captured real log as fake stdout):
-    replay        str   path to a log file, relative to the scene file
-    replay_delay  float seconds between lines (default 0.0)
 """
 
 import argparse
 import json
-import os
 import sys
 import time
-
-
-def run_replay(scene_path, replay_relpath, delay):
-    scene_dir = os.path.dirname(os.path.abspath(scene_path))
-    log_path = os.path.join(scene_dir, replay_relpath)
-    if not os.path.isfile(log_path):
-        print(f"[ERROR] replay file not found: {log_path}", flush=True)
-        sys.exit(1)
-    print(f"Fake simulator | replay: {log_path}", flush=True)
-    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            print(line, end="", flush=True)
-            if delay > 0:
-                time.sleep(delay)
-    sys.exit(0)
 
 
 def run_synthetic(scene, scene_path):
@@ -72,10 +52,7 @@ def main():
     with open(args.scene_file, "r", encoding="utf-8") as f:
         scene = json.load(f)
 
-    if "replay" in scene:
-        run_replay(args.scene_file, scene["replay"], float(scene.get("replay_delay", 0.0)))
-    else:
-        run_synthetic(scene, args.scene_file)
+    run_synthetic(scene, args.scene_file)
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ QUEUE_COLS = [
     ("Rmv", 5),
     ("Status", 10),
     ("Time", 10),
-    ("ETA", 8),
+    ("ETA", 9),
     ("Warnings", 9),
     ("Errors", 7),
 ]
@@ -478,6 +478,14 @@ class BatchSimuApp(App):
             f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
             f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
         )
+        # Tick the Time column on the queue table too. Worker writes the
+        # final elapsed when the case ends; until then we keep it live
+        # here at 1 Hz so users see a running clock without switching to
+        # the Running tab.
+        entry = self.current_entry
+        if entry is not None and entry.status == STATUS_RUNNING and entry.elapsed != elapsed:
+            entry.elapsed = elapsed
+            self.refresh_scene_queue()
 
     def set_status(self, text: str):
         self.query_one("#status_label", Static).update(text)
@@ -506,6 +514,30 @@ class BatchSimuApp(App):
         if elapsed is None or elapsed < 0:
             return "-"
         return str(datetime.timedelta(seconds=elapsed))
+
+    @staticmethod
+    def _fmt_eta(eta_token: Optional[str]) -> str:
+        """Format the ETA token captured by eta_pattern as H:MM:SS so it
+        lines up with the Time column. Recognises the three shapes the
+        simulators emit:
+            '<1m'   -> 0:00:00
+            'XhYm'  -> X:MM:00
+            'Xm'    -> H:MM:00 (minutes >= 60 carry into hours)
+        Anything else is returned verbatim as a fallback. We avoid
+        timedelta str here because it rolls 24h+ into "X days, ..."
+        which won't fit the column."""
+        if not eta_token:
+            return "-"
+        if eta_token == "<1m":
+            return "0:00:00"
+        m = re.match(r"(\d+)h(\d+)m\Z", eta_token)
+        if m:
+            return f"{int(m.group(1))}:{int(m.group(2)):02d}:00"
+        m = re.match(r"(\d+)m\Z", eta_token)
+        if m:
+            h, mm = divmod(int(m.group(1)), 60)
+            return f"{h}:{mm:02d}:00"
+        return eta_token
 
     def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str, str]:
         """Three-line header for the case-log tab, mirroring the Running
@@ -541,7 +573,7 @@ class BatchSimuApp(App):
                 self._fmt_bool(e.remove_output),
                 status_display(e),
                 self._fmt_time(e.elapsed),
-                e.eta or "-",
+                self._fmt_eta(e.eta),
                 str(e.warnings),
                 str(e.errors),
             ]

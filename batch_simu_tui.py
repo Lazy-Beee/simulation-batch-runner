@@ -518,19 +518,18 @@ class BatchSimuApp(App):
     @staticmethod
     def _fmt_eta(eta_token: Optional[str]) -> str:
         """Format the ETA token captured by eta_pattern as H:MM:SS so it
-        lines up with the Time column. Recognises the three shapes the
-        simulators emit:
-            '<1m'   -> 0:00:00
-            'XhYm'  -> X:MM:00
-            'Xm'    -> H:MM:00 (minutes >= 60 carry into hours)
-        Anything else is returned verbatim as a fallback. We avoid
-        timedelta str here because it rolls 24h+ into "X days, ..."
-        which won't fit the column."""
+        lines up with the Time column. Simulators only emit hours and
+        minutes - never days - so three token shapes cover everything:
+            '<1m'             -> 0:00:00
+            'XhYm' / 'Xh Ym'  -> X:MM:00 (CAMMP uses a space, SPH doesn't)
+            'Xm'              -> H:MM:00 (minutes >= 60 carry into hours)
+        Anything else is returned verbatim as a fallback."""
         if not eta_token:
             return "-"
+        eta_token = eta_token.strip()
         if eta_token == "<1m":
             return "0:00:00"
-        m = re.match(r"(\d+)h(\d+)m\Z", eta_token)
+        m = re.match(r"(\d+)h\s*(\d+)m\Z", eta_token)
         if m:
             return f"{int(m.group(1))}:{int(m.group(2)):02d}:00"
         m = re.match(r"(\d+)m\Z", eta_token)

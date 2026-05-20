@@ -32,7 +32,7 @@ import re
 
 from simulation import (
     Simulator, load_config,
-    profile_name, profile_supports_mpi, profile_step_marker, profile_eta_pattern,
+    profile_name, profile_supports_mpi, profile_step_pattern, profile_eta_pattern,
 )
 
 
@@ -327,7 +327,9 @@ class BatchSimuApp(App):
         self.current_case_start: float | None = None
         self.current_warnings = 0
         self.current_errors = 0
-        self.current_step_marker: str | None = None
+        # Compiled step_pattern regex for the current case; used by log_line
+        # to format the Step label and by log_lines_batch (if present).
+        self.current_step_re: Optional[re.Pattern] = None
         # Tracks the most recently applied profile so we only re-snap the
         # OMP/MPI switches when the matched profile actually transitions.
         self._last_profile_name: str | None = None
@@ -451,12 +453,22 @@ class BatchSimuApp(App):
             self.current_warnings += 1
             self._refresh_current_stats()
         elif kind == "step":
-            marker = self.current_step_marker
-            if marker and marker in line:
-                step_text = line[line.find(marker):].rstrip()
-            else:
-                step_text = line.rstrip()
-            self.query_one("#current_step_label", Static).update(f"Step: {step_text}")
+            self.query_one("#current_step_label", Static).update(
+                f"Step: {self._format_step_text(line)}"
+            )
+
+    def _format_step_text(self, line: str) -> str:
+        """Strip a step line down to the user-facing portion. If the active
+        profile's step_pattern regex has a capture group, that group wins;
+        otherwise the text starts at the first match position."""
+        r = self.current_step_re
+        if r is not None:
+            m = r.search(line)
+            if m:
+                if m.lastindex:
+                    return m.group(1).rstrip()
+                return line[m.start():].rstrip()
+        return line.rstrip()
 
     def _refresh_current_stats(self):
         if self.current_case_start is None:
@@ -930,7 +942,7 @@ class BatchSimuApp(App):
         # Restore exe input to the configured default + re-apply profile
         self.query_one("#exe_input", Input).value = self.simulator.default_exe
         self.query_one("#add_file_input", Input).value = ""
-        self.current_step_marker = None
+        self.current_step_re = None
         self._last_profile_name = None
         self.stop_requested = False
         self.force_stopped_current = False
@@ -1244,9 +1256,10 @@ class BatchSimuApp(App):
                     i += 1
                     continue
 
-                # Update step_marker for the current case's exe
+                # Compile the step / ETA regexes for this case's profile.
                 profile = sim.identify_profile(entry.exe_path)
-                self.current_step_marker = profile_step_marker(profile)
+                step_pattern_str = profile_step_pattern(profile)
+                self.current_step_re = re.compile(step_pattern_str) if step_pattern_str else None
                 eta_pat_str = profile_eta_pattern(profile)
                 eta_re = re.compile(eta_pat_str) if eta_pat_str else None
 

@@ -8,7 +8,7 @@
       "name": "simulator",
       "path_marker": "project_path",
       "supports_mpi": false,
-      "step_marker": "[step]",
+      "step_pattern": "\\[step\\] (.*)",
       "default_omp": false,
       "default_mpi": false,
       "eta_pattern": "eta:\\s*(\\S+)"

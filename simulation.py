@@ -87,11 +87,16 @@ def profile_supports_mpi(profile: Optional[dict]) -> bool:
     return True if profile is None else bool(profile.get("supports_mpi", True))
 
 
-def profile_step_marker(profile: Optional[dict]) -> Optional[str]:
+def profile_step_pattern(profile: Optional[dict]) -> Optional[str]:
+    """Regex string identifying a step / progress line in stdout.
+
+    Group 1 (if present) is the user-facing display text; otherwise the
+    match starts at the first matching position and runs to end-of-line.
+    None / empty disables step detection for this profile."""
     if profile is None:
         return None
-    marker = profile.get("step_marker")
-    return marker or None
+    pattern = profile.get("step_pattern")
+    return pattern or None
 
 
 def profile_eta_pattern(profile: Optional[dict]) -> Optional[str]:
@@ -223,7 +228,7 @@ class Simulator:
 
         on_line(line, kind): called per stdout line with the full original line.
             kind is the most-specific match: "step" (line contains the configured
-            simulator profile's step_marker), "error" ("[ERROR]"),
+            simulator profile's step_pattern), "error" ("[ERROR]"),
             "warning" ("[WARNING]"), or "raw" otherwise. Fires exactly once per
             line.
         process_holder: if a list is passed, the Popen handle is appended so
@@ -234,7 +239,8 @@ class Simulator:
         warnings = 0
         errors = 0
         output_folder: Optional[str] = None
-        step_marker = profile_step_marker(self.identify_profile(exe_path))
+        step_pattern_str = profile_step_pattern(self.identify_profile(exe_path))
+        step_re = re.compile(step_pattern_str) if step_pattern_str else None
 
         self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{total}):")
         self.info(
@@ -266,9 +272,12 @@ class Simulator:
                 if candidate:
                     output_folder = candidate
 
-            if step_marker and step_marker in line:
-                start = line.find(step_marker)
-                line_processed = line[start:].rstrip()
+            step_match = step_re.search(line) if step_re else None
+            if step_match:
+                if step_match.lastindex:
+                    line_processed = step_match.group(1).rstrip()
+                else:
+                    line_processed = line[step_match.start():].rstrip()
                 self.tg.send_message(
                     f"({index+1}/{total}) {line_processed}",
                     tag="Case",

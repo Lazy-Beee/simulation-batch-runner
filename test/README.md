@@ -47,7 +47,7 @@ Generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNI
 >   "name": "fake test sim",
 >   "path_marker": "fake_simulator",
 >   "supports_mpi": false,
->   "step_marker": "[step]",
+>   "step_pattern": "\\[step\\] (.*)",
 >   "default_omp": false,
 >   "default_mpi": false,
 >   "eta_pattern": "eta:\\s*(\\S+)"

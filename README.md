@@ -25,7 +25,7 @@ Two frontends share the same core (`simulation.py`):
      - `name` — display label
      - `path_marker` — case-insensitive substring matched against the exe path
      - `supports_mpi` — `false` disables MPI controls and skips the MPI prompt
-     - `step_marker` — substring identifying a step / progress line in stdout (drives the Running tab's step indicator and per-step Telegram messages)
+     - `step_pattern` — Python regex (`re.search`) matching a step / progress line in stdout. Capture group 1 (if present) is the display text; otherwise the text from the first match position is shown. Drives the Running tab's step indicator and per-step Telegram messages. Escape regex metacharacters: SPlisHSPlasH's literal `[step]` becomes `\\[step\\]`.
      - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; re-applied only when the matched profile *transitions*
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` for notifications
 
@@ -136,7 +136,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 ## How it works
 
 - Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
-- `stdout` is streamed live and parsed for the matched profile's `step_marker`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
+- `stdout` is streamed live and parsed for the matched profile's `step_pattern`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
 - Telegram digest at batch end summarises per-case time costs and totals.
 

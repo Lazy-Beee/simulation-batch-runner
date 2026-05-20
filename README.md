@@ -62,7 +62,7 @@ Clock and stats refresh every second. CPU/Memory require `psutil` — without it
 
 Additionally, **per-case log tabs** can be popped open from the Setup queue (see *View log*) and closed individually. Setup and Running are pinned and can't be closed.
 
-![Case-log tab: per-case header (Case / Exe / Status / Time / Warnings / Errors) and the captured log replayed in its own tab](https://github.com/Lazy-Beee/simulation-batch-runner/releases/download/v1.0.1/tui-case-log.png)
+![Case-log tab: per-case header (Case / Simulator / Status / Time / Warnings / Errors) and the captured log replayed in its own tab](https://github.com/Lazy-Beee/simulation-batch-runner/releases/download/v1.0.1/tui-case-log.png)
 
 ### Setup workflow
 
@@ -70,7 +70,7 @@ Additionally, **per-case log tabs** can be popped open from the Setup queue (see
 2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
 3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch. These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
 4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items.
-5. **Queue table** — 11 columns: `# / Exe / Scene / OMP / MPI / Zip / Rmv / Status / Time / Warnings / Errors`. Each row's background reflects its status:
+5. **Queue table** — 11 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Status / Time / Warnings / Errors`. Each row's background reflects its status:
 
    | Background | Status |
    |---|---|

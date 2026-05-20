@@ -1,24 +1,16 @@
 {
   "simulator": {
-    "default_exe": "C:\\Users\\junfan\\Documents\\SPlisHSPlasH-JF\\bin\\SPHSimulator.exe",
-    "zip_path": "C:\\Program Files\\7-Zip\\7z.exe"
+    "default_exe": "simulator.exe",
+    "zip_path": "7z.exe"
   },
   "simulator_profiles": [
     {
-      "name": "SPlisHSPlasH",
-      "path_marker": "SPlisHSPlasH",
+      "name": "simulator",
+      "path_marker": "project_path",
       "supports_mpi": false,
       "step_marker": "[step]",
       "default_omp": false,
       "default_mpi": false
-    },
-    {
-      "name": "CAMMP",
-      "path_marker": "CAMMP",
-      "supports_mpi": true,
-      "step_marker": "Processing job ",
-      "default_omp": false,
-      "default_mpi": true
     }
   ],
   "defaults": {

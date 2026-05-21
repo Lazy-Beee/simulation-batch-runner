@@ -150,6 +150,8 @@ class Simulator:
         sim = config.get("simulator", {})
         self.default_exe = sim.get("default_exe", "")
         self.zip_path = sim.get("zip_path", "")
+        self.zip_ext = sim.get("zip_ext", ".zip")
+        self.zip_args: List[str] = list(sim.get("zip_args", []))
 
         defaults = config.get("defaults", {})
         self.default_omp_threads = defaults.get("omp_threads", 24)
@@ -303,12 +305,16 @@ class Simulator:
     ) -> bool:
         """Archive the case output via 7-Zip.
 
-        on_line: if given, 7z output streams through this instead of inheriting
-            stdio. The TUI must pass one or 7z's ANSI/CR sequences corrupt the
-            Textual render.
+        Output filename gets zip_ext (default '.zip'); 7z auto-picks the
+        format from that extension. zip_args (e.g. ['-mx=3', '-mmt=8']) are
+        passed straight through between 'a' and the archive name.
+
+        on_line: if given, 7z output streams through this instead of
+            inheriting stdio. The TUI must pass one or 7z's ANSI/CR
+            sequences corrupt the Textual render.
         """
-        zip_file = f"{output_folder}.zip"
-        cmd = [self.zip_path, "a", zip_file, output_folder]
+        zip_file = f"{output_folder}{self.zip_ext}"
+        cmd = [self.zip_path, "a", *self.zip_args, zip_file, output_folder]
         try:
             if on_line is None:
                 subprocess.run(cmd, check=True)

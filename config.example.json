@@ -1,7 +1,9 @@
 {
   "simulator": {
     "default_exe": "simulator.exe",
-    "zip_path": "7z.exe"
+    "zip_path": "7z.exe",
+    "zip_ext": ".7z",
+    "zip_args": ["-mx=5", "-mmt=4", "-m0=lzma2"]
   },
   "simulator_profiles": [
     {

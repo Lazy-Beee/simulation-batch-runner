@@ -2,6 +2,8 @@
 
 import os
 import sys
+import queue
+import threading
 import subprocess
 import time as _time
 import shlex
@@ -315,6 +317,12 @@ class BatchSimuApp(App):
         # changes, so manual toggles survive further typing in the exe field.
         self._last_profile_name: str | None = None
         self._current_col_widths: Optional[list[int]] = None
+
+        # Background zip / remove queue. Each finished case enqueues a task
+        # (run by _zip_worker_loop) so the next case can start while the
+        # previous one is being archived. Drained at batch end.
+        self._zip_queue: queue.Queue = queue.Queue()
+        self._zip_worker: Optional[threading.Thread] = None
 
         # Drag-drop / paste target. Tracked from focus events instead of
         # App.focused or mouse_over because OLE drag-drop is modal on
@@ -717,6 +725,12 @@ class BatchSimuApp(App):
         self.set_interval(1.0, self._refresh_current_stats)
         self._refresh_topbar()
         self.set_interval(1.0, self._refresh_topbar)
+        # Daemon thread so it dies with the app; tasks queued during a batch
+        # are drained before the worker declares idle.
+        self._zip_worker = threading.Thread(
+            target=self._zip_worker_loop, daemon=True, name="zip-worker",
+        )
+        self._zip_worker.start()
 
     def on_resize(self, event):
         # Deferred: on_resize fires before the DataTable's content_size
@@ -1196,6 +1210,51 @@ class BatchSimuApp(App):
             entry.eta = None
         self.refresh_scene_queue()
 
+    def _zip_worker_loop(self):
+        # Tasks are (case_name, output_folder, do_zip, do_remove). Worker
+        # serialises them so we don't thrash disk with parallel 7z runs.
+        while True:
+            try:
+                task = self._zip_queue.get()
+            except Exception:
+                return
+            try:
+                if task is None:
+                    return
+                case_name, output_folder, do_zip, do_remove = task
+                self._run_zip_task(case_name, output_folder, do_zip, do_remove)
+            except Exception as e:
+                try:
+                    self.call_from_thread(
+                        self.log_line, f"Zip task crashed: {e}", "error",
+                    )
+                except Exception:
+                    pass
+            finally:
+                self._zip_queue.task_done()
+
+    def _run_zip_task(self, case_name: str, output_folder: Optional[str],
+                      do_zip: bool, do_remove: bool):
+        sim = self.simulator
+        if not do_zip:
+            return
+        if not output_folder:
+            sim.info(
+                f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
+                tag="Case",
+            )
+            return
+
+        def zip_on_line(line, kind):
+            self.call_from_thread(self.log_line, line, kind)
+
+        zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
+        if do_remove:
+            if zipped:
+                sim.remove_case_output(case_name, output_folder)
+            else:
+                sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
+
     @work(thread=True, exclusive=True)
     def _run_batch_worker(self):
         sim = self.simulator
@@ -1336,25 +1395,12 @@ class BatchSimuApp(App):
                 if result.returncode == 0:
                     entry.elapsed = result.elapsed
                     time_costs.append(result.elapsed)
-                    if entry.zip_output:
-                        if not result.output_folder:
-                            sim.info(
-                                f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
-                                tag="Case",
-                            )
-                        else:
-                            # Route 7z output through the log so its ANSI/CR
-                            # doesn't corrupt the Textual render.
-                            def zip_on_line(line, kind):
-                                self.call_from_thread(self.log_line, line, kind)
-                            zipped = sim.zip_case_output(
-                                case_name, result.output_folder, on_line=zip_on_line,
-                            )
-                            if entry.remove_output:
-                                if zipped:
-                                    sim.remove_case_output(case_name, result.output_folder)
-                                else:
-                                    sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
+                    # Enqueue zip + remove so the next case can start while
+                    # this one is being archived. Drained at batch end.
+                    self._zip_queue.put((
+                        case_name, result.output_folder,
+                        entry.zip_output, entry.remove_output,
+                    ))
                     final_status = STATUS_DONE
                 else:
                     entry.elapsed = -1
@@ -1373,6 +1419,16 @@ class BatchSimuApp(App):
                 i += 1
 
             self.call_from_thread(self.set_progress, 100)
+            # Drain any in-flight zip / remove tasks before reporting totals
+            # so the Telegram batch summary lands after the archive log
+            # noise rather than in the middle of it.
+            pending = self._zip_queue.unfinished_tasks
+            if pending:
+                self.call_from_thread(
+                    self.set_status,
+                    f"Finishing {pending} zip / remove task(s)...",
+                )
+                self._zip_queue.join()
             sim.send_batch_report(case_names, time_costs, total_failures, total_errors, total_warnings)
             sim.info("All done", tag="Batch")
 

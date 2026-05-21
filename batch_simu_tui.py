@@ -341,6 +341,11 @@ class BatchSimuApp(App):
         # OMP/MPI switches when the matched profile actually transitions.
         self._last_profile_name: str | None = None
 
+        # Most recently applied column widths for the queue table, so we
+        # only re-create the DataTable columns when the dynamic width
+        # actually changes (on resize) instead of on every refresh.
+        self._current_col_widths: Optional[list[int]] = None
+
         # Which Input drag-and-drop / paste content lands in. Updated whenever
         # the user focuses one of the two inputs (mouse click or Tab key).
         # We track this explicitly instead of reading App.focused at paste
@@ -478,21 +483,24 @@ class BatchSimuApp(App):
         return line.rstrip()
 
     def _refresh_current_stats(self):
-        if self.current_case_start is None:
-            return
-        elapsed = round(_time.time() - self.current_case_start)
-        self.query_one("#current_stats_label", Static).update(
-            f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
-            f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
-        )
-        # Tick the Time column on the queue table too. Worker writes the
-        # final elapsed when the case ends; until then we keep it live
-        # here at 1 Hz so users see a running clock without switching to
-        # the Running tab.
-        entry = self.current_entry
-        if entry is not None and entry.status == STATUS_RUNNING and entry.elapsed != elapsed:
-            entry.elapsed = elapsed
-            self.refresh_scene_queue()
+        if self.current_case_start is not None:
+            elapsed = round(_time.time() - self.current_case_start)
+            self.query_one("#current_stats_label", Static).update(
+                f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
+                f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
+            )
+            # Tick the Time column on the queue table too. Worker writes
+            # the final elapsed when the case ends; until then we keep
+            # it live here at 1 Hz so users see a running clock without
+            # switching to the Running tab.
+            entry = self.current_entry
+            if entry is not None and entry.status == STATUS_RUNNING:
+                entry.elapsed = elapsed
+        # Always re-render the queue so file-existence changes (a
+        # simulator / scene file removed or moved after Add) update the
+        # `[!]` marker promptly even while idle, and so any other stale
+        # field gets repainted within 1 second.
+        self.refresh_scene_queue()
 
     def set_status(self, text: str):
         self.query_one("#status_label", Static).update(text)
@@ -501,8 +509,21 @@ class BatchSimuApp(App):
         self.query_one("#progress", ProgressBar).update(progress=percent)
 
     @staticmethod
-    def _short(path: str) -> str:
-        return os.path.basename(path) if path else "(empty)"
+    def _short(path: str, width: int) -> str:
+        """Format a path for a fixed-width queue cell: drop the directory,
+        drop the (always-redundant) extension, then if the remainder is
+        still wider than the column, keep head + tail and elide the
+        middle with a single-char ellipsis so distinguishing prefixes
+        / suffixes (parameter values, indices) both survive."""
+        if not path:
+            return "(empty)"
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if len(stem) <= width:
+            return stem
+        keep = max(width - 1, 1)  # reserve 1 char for the ellipsis
+        head = keep // 2
+        tail = keep - head
+        return stem[:head] + "…" + stem[-tail:]
 
     @staticmethod
     def _fmt_omp(threads: Optional[int]) -> str:
@@ -559,19 +580,123 @@ class BatchSimuApp(App):
         )
         return case_line, exe_line, stats_line
 
+    def _compute_col_widths(self) -> list[int]:
+        """Pick column widths for the queue table.
+
+        Baseline is QUEUE_COLS. When the table's content region is wider
+        than the baseline sum, the extra space is split between the
+        Simulator and Scene columns with a 1:2 bias that bends to
+        actual content needs:
+
+          * Start at the 1:2 ratio (Simulator : Scene).
+          * If that share already covers a column's saturation point
+            (longest visible content + 1 trailing space, +4 for the
+            " [!]" missing-file marker on scene rows), cap that column
+            and hand the surplus to the other one.
+          * Once both columns can display every entry untruncated, any
+            remaining space goes back to a 1:2 split as visual padding.
+
+        The other columns stay at baseline; when the region is narrower
+        than baseline, every column keeps its configured width and the
+        DataTable handles overflow with its own horizontal scrolling.
+
+        We measure against scrollable_content_region (border / padding
+        *and* scrollbar gutter all removed) and the DataTable is built
+        with cell_padding=0, so the column-width sum can fill the
+        region exactly.
+        """
+        base = [w for _, w in QUEUE_COLS]
+        try:
+            table = self.query_one("#scene_queue", DataTable)
+            avail = table.scrollable_content_region.width
+        except Exception:
+            return base
+        base_sim, base_scene = base[1], base[2]
+        extra = avail - sum(base)
+        if extra <= 0:
+            return base
+
+        # Saturation point per column: the smallest width that lets the
+        # widest current entry render without _short truncating it. +1
+        # matches the trailing-space reservation in refresh_scene_queue;
+        # +4 on scene reserves the " [!]" marker for missing files.
+        sat_sim = 0
+        sat_scene = 0
+        for e in self.scene_entries:
+            if e.exe_path:
+                stem = os.path.splitext(os.path.basename(e.exe_path))[0]
+                sat_sim = max(sat_sim, len(stem) + 1)
+            if e.scene_path:
+                stem = os.path.splitext(os.path.basename(e.scene_path))[0]
+                missing_pad = 4 if not os.path.exists(e.scene_path) else 0
+                sat_scene = max(sat_scene, len(stem) + missing_pad + 1)
+        sim_need = max(0, sat_sim - base_sim)
+        scene_need = max(0, sat_scene - base_scene)
+        total_need = sim_need + scene_need
+
+        if extra > total_need:
+            # Both columns can fit their widest entry; the rest is
+            # padding distributed 1:2.
+            leftover = extra - total_need
+            bonus_sim = sim_need + leftover // 3
+            bonus_scene = scene_need + leftover - leftover // 3
+        else:
+            bonus_sim_12 = extra // 3
+            bonus_scene_12 = extra - bonus_sim_12
+            if bonus_sim_12 >= sim_need:
+                # Simulator already saturates under the 1:2 share;
+                # give the rest entirely to Scene.
+                bonus_sim = sim_need
+                bonus_scene = extra - sim_need
+            elif bonus_scene_12 >= scene_need:
+                # Scene saturates first; give the rest to Simulator.
+                bonus_scene = scene_need
+                bonus_sim = extra - scene_need
+            else:
+                # Neither column fits even at 1:2; take the split and
+                # let _short truncate proportionally.
+                bonus_sim = bonus_sim_12
+                bonus_scene = bonus_scene_12
+
+        widths = list(base)
+        widths[1] += bonus_sim
+        widths[2] += bonus_scene
+        return widths
+
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
         prev = table.cursor_row if table.row_count else None
-        table.clear()
-        widths = [w for _, w in QUEUE_COLS]
+        widths = self._compute_col_widths()
+        # Re-create the DataTable columns only when widths actually change
+        # (i.e. on the first paint or after a terminal resize). Mutating an
+        # existing column's width attribute doesn't reliably re-flow the
+        # layout, so we go through clear(columns=True) + add_column instead.
+        if widths != self._current_col_widths:
+            table.clear(columns=True)
+            for (label, _), w in zip(QUEUE_COLS, widths):
+                table.add_column(label, width=w)
+            self._current_col_widths = widths
+        else:
+            table.clear()
+        sim_w = widths[1]
+        scene_w = widths[2]
         for i, e in enumerate(self.scene_entries):
-            scene_disp = self._short(e.scene_path)
-            if not os.path.exists(e.scene_path):
+            # Reserve 1 char of trailing whitespace inside Simulator /
+            # Scene so a name that exactly fills its column doesn't butt
+            # against the next column's content; the row background
+            # style still covers the trailing space via styled_cell's
+            # ljust below. The Scene budget reserves another 4 chars when
+            # the file is missing so the " [!]" marker fits inside the
+            # column rather than pushing past it.
+            missing = bool(e.scene_path) and not os.path.exists(e.scene_path)
+            scene_budget = scene_w - 1 - (4 if missing else 0)
+            scene_disp = self._short(e.scene_path, scene_budget)
+            if missing:
                 scene_disp += " [!]"
             sty = ROW_STYLE_BY_STATUS.get(e.status, "")
             values = [
                 str(i + 1),
-                self._short(e.exe_path),
+                self._short(e.exe_path, sim_w - 1),
                 scene_disp,
                 self._fmt_omp(e.omp_threads),
                 self._fmt_mpi(e.mpi_ranks),
@@ -672,14 +797,33 @@ class BatchSimuApp(App):
     # ---------- mount ----------
 
     def on_mount(self):
-        queue = self.query_one("#scene_queue", DataTable)
-        for label, width in QUEUE_COLS:
-            queue.add_column(label, width=width)
+        # First paint of the queue table: refresh_scene_queue lazily
+        # creates the columns based on the current terminal width.
+        # During on_mount the DataTable's scrollable_content_region is
+        # still 0 (layout hasn't run yet), so this initial call lands on
+        # the baseline widths. A second pass scheduled via
+        # call_after_refresh fires after the first layout cycle and
+        # picks up the real region width, redistributing the bonus to
+        # Simulator / Scene without waiting for the user to resize.
+        self.refresh_scene_queue()
+        self.call_after_refresh(self.refresh_scene_queue)
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
         # Topbar clock + CPU/MEM refresh
         self._refresh_topbar()
         self.set_interval(1.0, self._refresh_topbar)
+
+    def on_resize(self, event):
+        # Recompute Simulator / Scene widths against the new terminal size
+        # and re-flow the table. Deferred via call_after_refresh because
+        # at the moment on_resize fires the DataTable's own content_size
+        # can still reflect the pre-resize layout - querying it inside
+        # this handler returns a stale value, leaving the columns one
+        # cell wide of (or short of) the new content region after a
+        # shrink. After the next refresh cycle, content_size has caught
+        # up. refresh_scene_queue itself is idempotent when widths are
+        # unchanged.
+        self.call_after_refresh(self.refresh_scene_queue)
 
     def _refresh_topbar(self):
         try:

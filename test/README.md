@@ -12,7 +12,7 @@ Generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNI
 
 ## How to play
 
-> **Before starting**: on the **Queue** tab, uncheck **Zip output** to silence 7-Zip errors. The fake doesn't create real output folders, so the zip step would log an error per case (no files are touched, just noisy).
+> **Before starting**: on the **Queue** tab, uncheck **Zip output** for scenes that don't set `output_files` — the fake doesn't create a real output folder for them, and the zip step would log an error per case (no files are touched, just noisy). `scene_output.json` is the exception: it writes a dummy output folder so you can leave Zip on to exercise that pipeline.
 
 1. Launch the TUI:
    ```powershell
@@ -40,6 +40,7 @@ Generates SPH-style `[step]` lines at a configurable rate, with optional `[WARNI
 | `scene_errors.json` | 5 steps with 1 warning + 2 errors, exits 0 |
 | `scene_fail.json` | Fails at step 3 (exit 1) — tests failure handling |
 | `scene_long.json` | 30 steps with `eta_per_step: 30` so the ETA column ticks down from `14h30m` — exercises long streaming + the Stop button |
+| `scene_output.json` | 4 steps that write 3 x 4 KiB dummy files into `test\output_scene_output\` and emit an `Output directory:` marker — exercises the zip + remove pipeline. Run with **Zip output** on. |
 
 > The ETA column only shows values when the matched simulator profile sets `eta_pattern` and the simulator emits a matching token. Because `test\fake_simulator.bat` doesn't match the `SPlisHSPlasH` / `CAMMP` path markers, it defaults to "Type: unknown" and ETA stays `-`. To see ETA extraction with the fake simulator, add a profile to `config.json` matching the fake exe:
 > ```json
@@ -71,3 +72,5 @@ At the prompt, type `test\fake_simulator.bat` for the simulator and paste scene 
 | `errors_at` | list | `[]` | step indices that emit `[ERROR]` |
 | `fail_at` | int | `null` | step index after which to exit 1 |
 | `eta_per_step` | int | 1 | minutes of virtual time per step; drives the `eta: XhYm` token on every step line |
+| `output_files` | int | 0 | write N dummy files into `<scene_dir>\output_<scene_stem>\` and emit an `Output directory:` marker. 0 = no output. |
+| `output_file_size` | int | 1024 | bytes per dummy file |

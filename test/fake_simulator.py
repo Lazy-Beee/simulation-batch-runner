@@ -1,21 +1,27 @@
 """Fake simulator that mimics SPHSimulator / CAMMP stdout for manual TUI/CLI testing.
 
 Reads a JSON scene file with these optional keys:
-    steps          int    number of simulation steps (default 10)
-    step_time      float  seconds per step (default 0.2)
-    warnings_at    list   step indices that emit a [WARNING] line (default [])
-    errors_at      list   step indices that emit an [ERROR] line (default [])
-    fail_at        int    step index after which to exit with code 1 (default null)
-    eta_per_step   int    minutes of virtual time each step represents,
-                          used to emit an `eta: XhYm` field on every step
-                          line so the batch runner's ETA column has
-                          something to show (default 1).
+    steps             int    number of simulation steps (default 10)
+    step_time         float  seconds per step (default 0.2)
+    warnings_at       list   step indices that emit a [WARNING] line (default [])
+    errors_at         list   step indices that emit an [ERROR] line (default [])
+    fail_at           int    step index after which to exit with code 1 (default null)
+    eta_per_step      int    minutes of virtual time each step represents,
+                             used to emit an `eta: XhYm` field on every step
+                             line so the batch runner's ETA column has
+                             something to show (default 1).
+    output_files      int    number of dummy files to write into an output
+                             folder, and emit an `Output directory:` marker
+                             so the batch runner's zip / remove pipeline
+                             has something to act on. 0 = no output (default).
+    output_file_size  int    bytes per dummy file (default 1024).
 """
 
 import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 
 def _format_eta(remaining_minutes):
@@ -38,6 +44,20 @@ def run_synthetic(scene, scene_path):
 
     print(f"Fake simulator | scene: {scene_path}", flush=True)
     print(f"Total steps: {steps}, step time: {step_time:.3f}s", flush=True)
+
+    # Optional dummy output folder so the TUI/CLI zip + remove pipeline has
+    # something real to operate on. Path is anchored to the scene file's
+    # parent dir so test runs don't litter the cwd.
+    output_files = int(scene.get("output_files", 0))
+    output_file_size = int(scene.get("output_file_size", 1024))
+    if output_files > 0:
+        scene_path_obj = Path(scene_path)
+        out_dir = scene_path_obj.parent / f"output_{scene_path_obj.stem}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = b"x" * output_file_size
+        for j in range(output_files):
+            (out_dir / f"file_{j:03d}.bin").write_bytes(payload)
+        print(f"Output directory: {out_dir}", flush=True)
 
     elapsed = []
     for i in range(1, steps + 1):

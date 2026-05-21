@@ -1372,7 +1372,14 @@ class BatchSimuApp(App):
                                 tag="Case",
                             )
                         else:
-                            zipped = sim.zip_case_output(case_name, result.output_folder)
+                            # Route 7z output through the log widget so its
+                            # raw ANSI/CR sequences don't bleed past the
+                            # Textual render and corrupt the TUI.
+                            def zip_on_line(line, kind):
+                                self.call_from_thread(self.log_line, line, kind)
+                            zipped = sim.zip_case_output(
+                                case_name, result.output_folder, on_line=zip_on_line,
+                            )
                             if entry.remove_output:
                                 if zipped:
                                     sim.remove_case_output(case_name, result.output_folder)

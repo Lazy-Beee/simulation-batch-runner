@@ -313,10 +313,40 @@ class Simulator:
 
         return CaseResult(process.returncode, elapsed, warnings, errors, output_folder)
 
-    def zip_case_output(self, case_name: str, output_folder: str) -> bool:
+    def zip_case_output(
+        self,
+        case_name: str,
+        output_folder: str,
+        on_line: Optional[Callable[[str, str], None]] = None,
+    ) -> bool:
+        """Run 7-Zip to archive the case output folder.
+
+        on_line(line, kind): when provided, 7z stdout/stderr is captured
+            and streamed through this callback ('raw' kind). When None,
+            7z inherits the parent's stdio - fine for the CLI but corrupts
+            the TUI's Textual render with stray ANSI/CR sequences, so the
+            TUI must always pass a callback that routes lines to its log.
+        """
         zip_file = f"{output_folder}.zip"
+        cmd = [self.zip_path, "a", zip_file, output_folder]
         try:
-            subprocess.run([self.zip_path, "a", zip_file, output_folder], check=True)
+            if on_line is None:
+                subprocess.run(cmd, check=True)
+            else:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                )
+                for line in proc.stdout:
+                    on_line(line, "raw")
+                proc.wait()
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode, cmd)
             self.info(f"Compressed output of case '{case_name}'", tag="Case")
             return True
         except subprocess.CalledProcessError as e:

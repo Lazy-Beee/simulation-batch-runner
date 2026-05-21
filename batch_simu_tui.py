@@ -36,8 +36,6 @@ from simulation import (
 )
 
 
-# Lifecycle states a queued entry passes through.
-# Visual styling and reorder-locking both key off of this.
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -46,7 +44,6 @@ STATUS_MISSING = "missing"   # scene file didn't exist when we tried to run it
 STATUS_ERROR = "error"       # exception during run
 STATUS_STOPPED = "stopped"   # process was force-stopped mid-run
 
-# Statuses that are removable from the queue (anything not currently in flight).
 REMOVABLE_STATUSES = {STATUS_PENDING, STATUS_STOPPED}
 
 ROW_STYLE_BY_STATUS = {
@@ -59,7 +56,6 @@ ROW_STYLE_BY_STATUS = {
     STATUS_STOPPED: "on grey35",
 }
 
-# Single Setup queue table now also carries result columns (formerly the Done tab).
 QUEUE_COLS = [
     ("#", 4),
     ("Simulator", 22),
@@ -88,18 +84,17 @@ def status_display(entry) -> str:
         return "EXCEPTION"
     if s == STATUS_STOPPED:
         return "STOPPED"
-    return s  # pending / running
+    return s
 
 
 def styled_cell(value, width: int, style: str) -> Text:
-    """Build a left-justified Text padded to `width` with `style` applied to
-    the whole span (including the trailing spaces), so the cell background
-    colour fills the entire cell rather than just the printable characters."""
+    # ljust pads with spaces and the style covers the whole span, so the row
+    # background colour fills the entire cell instead of just the text.
     return Text(str(value).ljust(width), style=style)
 
 
 class TopBar(Horizontal):
-    """Replaces the default Header. Layout: title | spacer | CPU/MEM | clock."""
+    """title | spacer | CPU/MEM | clock."""
 
     DEFAULT_CSS = """
     TopBar {
@@ -128,12 +123,8 @@ class TopBar(Horizontal):
 
 
 def kill_proc_tree(proc):
-    """Best-effort terminate a process and all of its children.
-
-    proc.terminate() on Windows only kills the immediate process, which is
-    wrong for .bat / wrapper exes whose actual work runs in a child
-    process. Windows' taskkill /F /T walks the process tree.
-    """
+    """Terminate a process and all its children. Uses taskkill /F /T on Windows
+    so .bat / wrapper exes don't leave the real worker alive."""
     if proc is None or proc.poll() is not None:
         return
     if sys.platform == "win32":
@@ -153,31 +144,22 @@ def kill_proc_tree(proc):
 
 @dataclass
 class SceneEntry:
-    """Snapshot of a queued case: exe + scene + per-case OMP/MPI/zip/remove settings,
-    plus mutable run-state fields updated by the worker."""
+    """One queued case: settings snapshotted at Add time plus mutable run state."""
     exe_path: str
     scene_path: str
     omp_threads: Optional[int]   # None = no OMP limit
     mpi_ranks: int               # 0 = MPI disabled
     zip_output: bool
     remove_output: bool
-    # Run state (mutable; updated as the batch progresses)
     status: str = STATUS_PENDING
     returncode: Optional[int] = None
     elapsed: Optional[int] = None
     warnings: int = 0
     errors: int = 0
-    # ETA token extracted from the most recent step line (e.g. '7h57m',
-    # '<1m'). Profile must define eta_pattern to enable extraction.
     eta: Optional[str] = None
-    # Captured (line, kind) pairs for this case. The Running tab shows the
-    # live unified stream; this buffer feeds the per-case tab a user can
-    # pop open from the Setup queue to look at one case in isolation.
     log_buffer: list = field(default_factory=list)
-    # Per-case private copy of the simulator exe, taken at the moment the
-    # entry was added to the queue (see _add_from_input). Each entry owns
-    # its own copy so re-compiling the source exe mid-batch only affects
-    # cases added after the rebuild. None means no copy was prepared yet.
+    # Per-case private copy of the source exe, taken at Add time. Each entry
+    # owns its own copy so re-compiling mid-batch only affects later adds.
     batch_exe_path: Optional[str] = None
 
 
@@ -191,8 +173,6 @@ def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
             base = f"Type: {name} (single-process only - MPI not supported)"
         else:
             base = f"Type: {name}"
-    # Flag a non-empty path that doesn't resolve to a file on disk. Empty
-    # input stays clean (the user hasn't entered anything yet).
     if exe_path and not os.path.isfile(exe_path):
         base += "  [red](file not found)[/red]"
     return base
@@ -204,7 +184,7 @@ def format_drag_target_text(target_id: str) -> str:
 
 
 def strip_quotes(s: str) -> str:
-    """Drag-and-drop on Windows Terminal often inserts quoted paths; strip outer quotes."""
+    """Strip outer quotes - Windows Terminal drag-drop inserts them."""
     s = s.strip()
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
         return s[1:-1]
@@ -305,14 +285,10 @@ class BatchSimuApp(App):
 
     BINDINGS = [
         Binding("ctrl+s", "start", "Start", priority=True),
-        # ctrl+x and ctrl+w collide with Input's built-in 'cut' / 'delete-word'
-        # bindings. show=False hides them from the Footer so the Footer key
-        # order stays stable when an Input is focused (otherwise these
-        # bindings get inserted at the Input.BINDINGS slot positions, which
-        # are interleaved among Input's own keys). Stop keeps priority=True
-        # so ctrl+x still fires from inside an Input; close_tab is left
-        # non-priority on purpose so ctrl+w inside an Input remains
-        # delete-left-word.
+        # ctrl+x and ctrl+w collide with Input's cut / delete-word. show=False
+        # keeps the Footer key order stable when an Input is focused; ctrl+x
+        # stays priority=True so Stop still fires from inside an Input, ctrl+w
+        # stays non-priority so Input's delete-word still works there.
         Binding("ctrl+x", "stop", "Stop", priority=True, show=False),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+q", "quit", "Quit", priority=True),
@@ -334,25 +310,16 @@ class BatchSimuApp(App):
         self.current_case_start: float | None = None
         self.current_warnings = 0
         self.current_errors = 0
-        # Compiled step_pattern regex for the current case; used by log_line
-        # to format the Step label and by log_lines_batch (if present).
         self.current_step_re: Optional[re.Pattern] = None
-        # Tracks the most recently applied profile so we only re-snap the
-        # OMP/MPI switches when the matched profile actually transitions.
+        # Re-snap OMP/MPI defaults only when the matched profile actually
+        # changes, so manual toggles survive further typing in the exe field.
         self._last_profile_name: str | None = None
-
-        # Most recently applied column widths for the queue table, so we
-        # only re-create the DataTable columns when the dynamic width
-        # actually changes (on resize) instead of on every refresh.
         self._current_col_widths: Optional[list[int]] = None
 
-        # Which Input drag-and-drop / paste content lands in. Updated whenever
-        # the user focuses one of the two inputs (mouse click or Tab key).
-        # We track this explicitly instead of reading App.focused at paste
-        # time because OLE drag-drop is modal: switching to the file manager
-        # to grab a file clears App focus, and the bracketed-paste event
-        # arrives without restoring it. mouse_over is also stale at that
-        # point (no MouseMove events are delivered during the drag).
+        # Drag-drop / paste target. Tracked from focus events instead of
+        # App.focused or mouse_over because OLE drag-drop is modal on
+        # Windows: switching to the file manager clears focus, and no
+        # MouseMove events are delivered while the drag is in progress.
         self._paste_target_id: str = "add_file_input"
 
     def compose(self) -> ComposeResult:
@@ -433,8 +400,6 @@ class BatchSimuApp(App):
 
         yield Footer()
 
-    # ---------- helpers ----------
-
     _KIND_COLOR = {
         "error": "red",
         "warning": "yellow",
@@ -444,9 +409,6 @@ class BatchSimuApp(App):
 
     @classmethod
     def _write_log_line(cls, widget: RichLog, line: str, kind: str):
-        """Style-and-write a single (line, kind) pair to any RichLog without
-        touching app-wide state. Used by both the Running tab log writer and
-        the per-case tab replay."""
         line = line.rstrip("\n")
         color = cls._KIND_COLOR.get(kind)
         if color:
@@ -457,7 +419,6 @@ class BatchSimuApp(App):
     def log_line(self, line: str, kind: str = "raw"):
         widget = self.query_one("#log_panel", RichLog)
         self._write_log_line(widget, line, kind)
-        # Side-effects only relevant to the live Running tab
         if kind == "error":
             self.current_errors += 1
             self._refresh_current_stats()
@@ -470,9 +431,6 @@ class BatchSimuApp(App):
             )
 
     def _format_step_text(self, line: str) -> str:
-        """Strip a step line down to the user-facing portion. If the active
-        profile's step_pattern regex has a capture group, that group wins;
-        otherwise the text starts at the first match position."""
         r = self.current_step_re
         if r is not None:
             m = r.search(line)
@@ -489,18 +447,11 @@ class BatchSimuApp(App):
                 f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
                 f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
             )
-            # Tick the Time column on the queue table too. Worker writes
-            # the final elapsed when the case ends; until then we keep
-            # it live here at 1 Hz so users see a running clock without
-            # switching to the Running tab.
             entry = self.current_entry
             if entry is not None and entry.status == STATUS_RUNNING:
                 entry.elapsed = elapsed
-                # Re-render the "Case N/M" labels with the latest queue
-                # length so mid-case Adds aren't stuck displaying the
-                # snapshot total taken at case start. Locate i by
-                # object identity rather than dataclass equality so two
-                # entries with the same fields can't shadow each other.
+                # Match by identity, not dataclass equality - two entries with
+                # identical fields would otherwise shadow each other.
                 idx = next(
                     (j for j, e in enumerate(self.scene_entries) if e is entry),
                     -1,
@@ -512,10 +463,8 @@ class BatchSimuApp(App):
                     self.query_one("#current_case_label", Static).update(
                         f"Case: {case_name} ({idx+1}/{total})"
                     )
-        # Always re-render the queue so file-existence changes (a
-        # simulator / scene file removed or moved after Add) update the
-        # `[!]` marker promptly even while idle, and so any other stale
-        # field gets repainted within 1 second.
+        # Repaint every tick so file-existence changes flip the `[!]` marker
+        # even while idle.
         self.refresh_scene_queue()
 
     def set_status(self, text: str):
@@ -526,17 +475,13 @@ class BatchSimuApp(App):
 
     @staticmethod
     def _short(path: str, width: int) -> str:
-        """Format a path for a fixed-width queue cell: drop the directory,
-        drop the (always-redundant) extension, then if the remainder is
-        still wider than the column, keep head + tail and elide the
-        middle with a single-char ellipsis so distinguishing prefixes
-        / suffixes (parameter values, indices) both survive."""
+        """Basename without extension; head + ellipsis + tail when too wide."""
         if not path:
             return "(empty)"
         stem = os.path.splitext(os.path.basename(path))[0]
         if len(stem) <= width:
             return stem
-        keep = max(width - 1, 1)  # reserve 1 char for the ellipsis
+        keep = max(width - 1, 1)
         head = keep // 2
         tail = keep - head
         return stem[:head] + "…" + stem[-tail:]
@@ -561,13 +506,8 @@ class BatchSimuApp(App):
 
     @staticmethod
     def _fmt_eta(eta_token: Optional[str]) -> str:
-        """Format the ETA token captured by eta_pattern as H:MM:SS so it
-        lines up with the Time column. Simulators only emit hours and
-        minutes - never days - so three token shapes cover everything:
-            '<1m'             -> 0:00:00
-            'XhYm' / 'Xh Ym'  -> X:MM:00 (CAMMP uses a space, SPH doesn't)
-            'Xm'              -> H:MM:00 (minutes >= 60 carry into hours)
-        Anything else is returned verbatim as a fallback."""
+        # Accepts '<1m', 'XhYm', 'Xh Ym' (CAMMP), or 'Xm' (Xm >= 60 carries
+        # into hours). Anything else is returned verbatim.
         if not eta_token:
             return "-"
         eta_token = eta_token.strip()
@@ -583,9 +523,6 @@ class BatchSimuApp(App):
         return eta_token
 
     def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str, str]:
-        """Three-line header for the case-log tab, mirroring the Running
-        tab's case / step / stats stack: case name (accent bold), exe
-        basename, then a stats row that pairs with a Copy button."""
         case_line = f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"
         exe_line = f"Simulator: {os.path.basename(entry.exe_path)}"
         stats_line = (
@@ -597,29 +534,14 @@ class BatchSimuApp(App):
         return case_line, exe_line, stats_line
 
     def _compute_col_widths(self) -> list[int]:
-        """Pick column widths for the queue table.
+        """Distribute width beyond baseline to Simulator / Scene at 1:2,
+        rolling the surplus to whichever column is still truncated once
+        the other saturates. Other columns stay at baseline; narrower
+        than baseline falls back to baseline + DataTable scrolling.
 
-        Baseline is QUEUE_COLS. When the table's content region is wider
-        than the baseline sum, the extra space is split between the
-        Simulator and Scene columns with a 1:2 bias that bends to
-        actual content needs:
-
-          * Start at the 1:2 ratio (Simulator : Scene).
-          * If that share already covers a column's saturation point
-            (longest visible content + 1 trailing space, +4 for the
-            " [!]" missing-file marker on scene rows), cap that column
-            and hand the surplus to the other one.
-          * Once both columns can display every entry untruncated, any
-            remaining space goes back to a 1:2 split as visual padding.
-
-        The other columns stay at baseline; when the region is narrower
-        than baseline, every column keeps its configured width and the
-        DataTable handles overflow with its own horizontal scrolling.
-
-        We measure against scrollable_content_region (border / padding
-        *and* scrollbar gutter all removed) and the DataTable is built
-        with cell_padding=0, so the column-width sum can fill the
-        region exactly.
+        Uses scrollable_content_region (excludes border, padding, and
+        scrollbar gutter) and the DataTable has cell_padding=0, so the
+        column-width sum can fill the region exactly.
         """
         base = [w for _, w in QUEUE_COLS]
         try:
@@ -651,8 +573,6 @@ class BatchSimuApp(App):
         total_need = sim_need + scene_need
 
         if extra > total_need:
-            # Both columns can fit their widest entry; the rest is
-            # padding distributed 1:2.
             leftover = extra - total_need
             bonus_sim = sim_need + leftover // 3
             bonus_scene = scene_need + leftover - leftover // 3
@@ -660,17 +580,12 @@ class BatchSimuApp(App):
             bonus_sim_12 = extra // 3
             bonus_scene_12 = extra - bonus_sim_12
             if bonus_sim_12 >= sim_need:
-                # Simulator already saturates under the 1:2 share;
-                # give the rest entirely to Scene.
                 bonus_sim = sim_need
                 bonus_scene = extra - sim_need
             elif bonus_scene_12 >= scene_need:
-                # Scene saturates first; give the rest to Simulator.
                 bonus_scene = scene_need
                 bonus_sim = extra - scene_need
             else:
-                # Neither column fits even at 1:2; take the split and
-                # let _short truncate proportionally.
                 bonus_sim = bonus_sim_12
                 bonus_scene = bonus_scene_12
 
@@ -683,10 +598,8 @@ class BatchSimuApp(App):
         table = self.query_one("#scene_queue", DataTable)
         prev = table.cursor_row if table.row_count else None
         widths = self._compute_col_widths()
-        # Re-create the DataTable columns only when widths actually change
-        # (i.e. on the first paint or after a terminal resize). Mutating an
-        # existing column's width attribute doesn't reliably re-flow the
-        # layout, so we go through clear(columns=True) + add_column instead.
+        # Mutating an existing column's width doesn't reliably re-flow the
+        # layout, so re-create columns whenever the widths change.
         if widths != self._current_col_widths:
             table.clear(columns=True)
             for (label, _), w in zip(QUEUE_COLS, widths):
@@ -697,13 +610,7 @@ class BatchSimuApp(App):
         sim_w = widths[1]
         scene_w = widths[2]
         for i, e in enumerate(self.scene_entries):
-            # Reserve 1 char of trailing whitespace inside Simulator /
-            # Scene so a name that exactly fills its column doesn't butt
-            # against the next column's content; the row background
-            # style still covers the trailing space via styled_cell's
-            # ljust below. The Scene budget reserves another 4 chars when
-            # the file is missing so the " [!]" marker fits inside the
-            # column rather than pushing past it.
+            # -1 reserves a trailing space, -4 more reserves the " [!]" marker.
             missing = bool(e.scene_path) and not os.path.exists(e.scene_path)
             scene_budget = scene_w - 1 - (4 if missing else 0)
             scene_disp = self._short(e.scene_path, scene_budget)
@@ -742,8 +649,6 @@ class BatchSimuApp(App):
         mpi_switch = self.query_one("#mpi_switch", Switch)
         omp_switch = self.query_one("#omp_switch", Switch)
 
-        # Only re-apply OMP/MPI switch defaults when the matched profile
-        # transitions (avoids clobbering manual toggles while the user types).
         current_id = profile_name(profile)
         if current_id != self._last_profile_name:
             self._last_profile_name = current_id
@@ -777,17 +682,9 @@ class BatchSimuApp(App):
         self._sync_input_enabled_state()
 
     def switch_tab(self, tab_id: str):
-        """Activate a tab by id.
-
-        Textual's TabbedContent.show_tab() is just an unhide helper - it does
-        NOT switch the active pane. The actual switch is `tc.active = tab_id`,
-        which fires the internal _watch_active watcher.
-
-        We additionally drop focus before switching: if a Button on the
-        previous tab still has focus when the active pane changes, Textual
-        snaps back to keep the focused widget visible (causing the "screen
-        flashes but tab stays put" symptom).
-        """
+        # show_tab() in Textual just unhides; tc.active = id is the real switch.
+        # Drop focus first or a focused Button on the previous tab snaps the
+        # active pane back to keep its widget visible.
         try:
             tc = self.query_one(TabbedContent)
             try:
@@ -810,35 +707,20 @@ class BatchSimuApp(App):
     def finish_current_case(self):
         self.current_case_start = None
 
-    # ---------- mount ----------
-
     def on_mount(self):
-        # First paint of the queue table: refresh_scene_queue lazily
-        # creates the columns based on the current terminal width.
-        # During on_mount the DataTable's scrollable_content_region is
-        # still 0 (layout hasn't run yet), so this initial call lands on
-        # the baseline widths. A second pass scheduled via
-        # call_after_refresh fires after the first layout cycle and
-        # picks up the real region width, redistributing the bonus to
-        # Simulator / Scene without waiting for the user to resize.
+        # First paint runs before layout, so scrollable_content_region is 0
+        # and refresh lands on baseline widths. The deferred call re-runs
+        # after layout to pick up the bonus distribution.
         self.refresh_scene_queue()
         self.call_after_refresh(self.refresh_scene_queue)
         self.apply_sim_type(self.query_one("#exe_input", Input).value)
         self.set_interval(1.0, self._refresh_current_stats)
-        # Topbar clock + CPU/MEM refresh
         self._refresh_topbar()
         self.set_interval(1.0, self._refresh_topbar)
 
     def on_resize(self, event):
-        # Recompute Simulator / Scene widths against the new terminal size
-        # and re-flow the table. Deferred via call_after_refresh because
-        # at the moment on_resize fires the DataTable's own content_size
-        # can still reflect the pre-resize layout - querying it inside
-        # this handler returns a stale value, leaving the columns one
-        # cell wide of (or short of) the new content region after a
-        # shrink. After the next refresh cycle, content_size has caught
-        # up. refresh_scene_queue itself is idempotent when widths are
-        # unchanged.
+        # Deferred: on_resize fires before the DataTable's content_size
+        # catches up, so an immediate read returns a stale value.
         self.call_after_refresh(self.refresh_scene_queue)
 
     def _refresh_topbar(self):
@@ -847,8 +729,8 @@ class BatchSimuApp(App):
             self.query_one("#topbar_clock", Label).update(clock_text)
             stats_label = self.query_one("#topbar_stats", Label)
             if HAS_PSUTIL:
-                # interval=None -> percent since the previous call; first
-                # call after import returns 0, subsequent calls real %.
+                # interval=None = % since the previous call; first call after
+                # import is always 0.
                 cpu = psutil.cpu_percent(interval=None)
                 vm = psutil.virtual_memory()
                 used_gb = vm.used / (1024 ** 3)
@@ -908,7 +790,6 @@ class BatchSimuApp(App):
             self.log_line(f"Error parsing input: {e}", "error")
             return
 
-        # Snapshot the current widget state for these new entries
         exe_path = strip_quotes(self.query_one("#exe_input", Input).value)
         use_omp = self.query_one("#omp_switch", Switch).value
         omp = (
@@ -920,17 +801,14 @@ class BatchSimuApp(App):
             self._read_int(self.query_one("#mpi_input", Input).value, self.simulator.default_mpi_ranks)
             if use_mpi else 0
         )
-        # Profile may forbid MPI; force off in that case (defense in depth)
         if not profile_supports_mpi(self.simulator.identify_profile(exe_path)):
             mpi = 0
         zip_out = self.query_one("#zip_switch", Switch).value
         rm_out = self.query_one("#remove_switch", Switch).value
 
-        # All entries from this one Add call share a single snapshot of the
-        # simulator exe - the user can't recompile in the middle of a single
-        # synchronous Add. Snapshots only diverge across separate Add calls,
-        # which is enough granularity to handle "rebuild mid-batch then add
-        # more cases" correctly without bloating disk for batch adds.
+        # All entries from one Add share a single exe snapshot. Snapshots only
+        # diverge across separate Add calls, so a rebuild mid-batch only affects
+        # cases added after it.
         if not os.path.isfile(exe_path):
             self.log_line(f"Simulator exe not found: {exe_path}", "error")
             return
@@ -958,18 +836,13 @@ class BatchSimuApp(App):
                 self.log_line(f"Warning: scene file not found: {p}", "warning")
 
         if added == 0:
-            # No entries committed (defensive - shouldn't happen, paths
-            # parsing above already returns early on empty input); roll
-            # back the orphan copy so it doesn't leak.
+            # Defensive: no entries committed, roll back the orphan exe copy.
             try:
                 self.simulator.cleanup_exe(shared_batch_exe)
             except Exception:
                 pass
         else:
-            # Announce queue growth that happens while a batch is
-            # already running, so the Telegram digest's "(i+1/total)"
-            # jump from the original snapshot to the new live total
-            # isn't a mystery to anyone reading the chat.
+            # Explain the per-case denominator jump on the Telegram side.
             if self.batch_running:
                 self.simulator.info(
                     f"Queue extended mid-batch: +{added} case(s), "
@@ -982,11 +855,6 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#view_log_btn")
     async def on_view_log(self):
-        """Open (or switch to) a per-case tab showing that case's captured log.
-
-        Only finished cases get a log tab. For a running case the live log is
-        already on the Running tab; pending cases have nothing to show yet.
-        """
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
@@ -1004,7 +872,6 @@ class BatchSimuApp(App):
     async def _open_case_tab(self, entry: SceneEntry):
         tc = self.query_one(TabbedContent)
         tab_id = f"case-{id(entry)}"
-        # If a tab for this entry already exists, just switch to it.
         try:
             tc.get_pane(tab_id)
             self.switch_tab(tab_id)
@@ -1031,17 +898,15 @@ class BatchSimuApp(App):
         )
         pane = TabPane(case_name, header_case, header_exe, header_stats, log_widget, id=tab_id)
         await tc.add_pane(pane)
-        # Replay the buffered lines into the new widget
         for line, kind in entry.log_buffer:
             self._write_log_line(log_widget, line, kind)
         if not entry.log_buffer:
             log_widget.write("[dim](no output yet)[/dim]")
-        # Use switch_tab so the explicit self.refresh() force-flushes the
-        # tab-bar repaint (Textual sometimes drops it right after add_pane).
+        # switch_tab's explicit refresh() flushes the tab-bar repaint that
+        # Textual sometimes drops right after add_pane.
         self.switch_tab(tab_id)
 
     async def action_close_tab(self):
-        """Close the active tab unless it's setup or running (those are pinned)."""
         tc = self.query_one(TabbedContent)
         active = tc.active
         if not active or active in ("setup", "running"):
@@ -1079,14 +944,12 @@ class BatchSimuApp(App):
         self.log_line(f"Removed: {target.scene_path}", "info")
 
     def _cleanup_entry_exe(self, entry: SceneEntry):
-        """Drop this entry's reference to its batch_exe copy, and delete
-        the copy on disk only if no other entry still references it.
-        Idempotent; used by on_remove / on_reset / on_unmount."""
+        """Drop the entry's exe-copy ref. Deletes the on-disk copy only when
+        no other entry still references it (a batch-Add shares one copy)."""
         path = entry.batch_exe_path
         if not path:
             return
         entry.batch_exe_path = None
-        # A batch-Add of N scenes shares one copy; only the last drop deletes.
         if any(e.batch_exe_path == path for e in self.scene_entries):
             return
         try:
@@ -1103,11 +966,7 @@ class BatchSimuApp(App):
         self._move_selected(+1)
 
     def _move_selected(self, delta: int):
-        """Move the selected queue row up (delta=-1) or down (+1).
-
-        Only pending entries may move, and they may not jump past a non-pending
-        neighbour (i.e. cannot land before the running/done barrier).
-        """
+        # Only pending entries can be reordered, and not past a non-pending row.
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
@@ -1126,7 +985,6 @@ class BatchSimuApp(App):
             self.scene_entries[idx],
         )
         self.refresh_scene_queue()
-        # Move cursor along with the row we just shifted
         if 0 <= new_idx < table.row_count:
             table.move_cursor(row=new_idx)
 
@@ -1139,15 +997,12 @@ class BatchSimuApp(App):
         # the queue is wiped.
         for entry in self.scene_entries:
             self._cleanup_entry_exe(entry)
-        # Close any per-case tabs the user had opened
         await self._close_all_case_tabs()
-        # Wipe queue
         self.scene_entries.clear()
         self.refresh_scene_queue()
         self.set_status("Idle")
         self.set_progress(0)
         self.query_one("#log_panel", RichLog).clear()
-        # Restore exe input to the configured default + re-apply profile
         self.query_one("#exe_input", Input).value = self.simulator.default_exe
         self.query_one("#add_file_input", Input).value = ""
         self.current_step_re = None
@@ -1156,7 +1011,6 @@ class BatchSimuApp(App):
         self.force_stopped_current = False
         self.current_entry = None
         self.apply_sim_type(self.simulator.default_exe)
-        # Reset run-time stats
         self.current_warnings = 0
         self.current_errors = 0
         self.finish_current_case()
@@ -1167,34 +1021,25 @@ class BatchSimuApp(App):
         self.switch_tab("setup")
 
     def on_paste(self, event: events.Paste):
-        """Drag-and-drop into a Textual app comes through as a bracketed paste.
-
-        Route to whichever of the two inputs was most recently focused (see
-        on_descendant_focus). We can't use mouse position - OLE drag-drop on
-        Windows is modal, so no MouseMove events arrive between leaving the
-        terminal to grab a file and the drop landing back - and we can't
-        trust self.focused either, because alt-tabbing out and back can
-        clear it. Mirroring the last clicked/Tab-selected input is the
-        sturdiest mapping under those constraints."""
+        # Drag-and-drop comes through as a bracketed paste. We route by the
+        # last-focused input (see on_descendant_focus) since OLE drag-drop is
+        # modal on Windows - no MouseMove events arrive during the drag, and
+        # self.focused can clear via alt-tab.
         text = event.text or ""
-        # Normalize: terminals often append CR/LF and may wrap with quotes
         text = text.replace("\r", "").replace("\n", " ").strip()
         if not text:
             return
 
         if self._paste_target_id == "exe_input":
             self.query_one("#exe_input", Input).value = strip_quotes(text)
-        else:  # add_file_input - keep quotes; _add_from_input uses shlex.split
+        else:
+            # add_file_input keeps quotes; _add_from_input uses shlex.split.
             scene_input = self.query_one("#add_file_input", Input)
             scene_input.value = text
             scene_input.focus()
         event.stop()
 
     def on_descendant_focus(self, event: events.DescendantFocus):
-        """Track which of our two routable inputs was last focused so the next
-        paste / drag-drop lands there. Triggered by both mouse click and Tab
-        key navigation. Other focusable widgets (switches, buttons, the
-        OMP/MPI inputs) are ignored - they don't change the paste target."""
         w = event.control
         if isinstance(w, Input) and w.id in ("exe_input", "add_file_input"):
             self._set_paste_target(w.id)
@@ -1208,22 +1053,15 @@ class BatchSimuApp(App):
                 format_drag_target_text(target_id)
             )
         except Exception:
-            # Label may not exist yet during early mount; the initial render
-            # already shows the default target.
             pass
 
     def action_clear_log(self):
         self.query_one("#log_panel", RichLog).clear()
 
     def action_copy_log(self):
-        """Copy the active tab's RichLog content to the system clipboard.
-
-        Driven by the Copy button in Running and case tabs. Textual's
-        click-drag selection works for Static/Label but not for RichLog
-        (mouse-down is eaten by the scrollable container), so this gives
-        the user a one-shot 'copy everything in this log' path. The
-        terminal's own Shift+drag selection is still the finer-grained
-        alternative."""
+        # RichLog swallows Textual's click-drag selection (scrollable
+        # container eats mouse-down), so the Copy button is the one-shot
+        # 'copy everything in this log' path.
         log_widget = self._active_log_widget()
         if log_widget is None:
             self.notify("Switch to Running or a case tab first.", severity="warning")
@@ -1237,8 +1075,6 @@ class BatchSimuApp(App):
         self.notify(f"Copied {len(lines)} lines to clipboard.")
 
     def _active_log_widget(self) -> Optional[RichLog]:
-        """Return the RichLog inside the currently active tab, or None for
-        tabs without one (Setup)."""
         tc = self.query_one(TabbedContent)
         active = tc.active
         if not active or active == "setup":
@@ -1264,8 +1100,6 @@ class BatchSimuApp(App):
 
     @staticmethod
     def _reset_entry_run_state(entry: SceneEntry):
-        """Clear the per-entry run-state fields so the worker picks it up
-        as a fresh PENDING case again."""
         entry.status = STATUS_PENDING
         entry.returncode = None
         entry.elapsed = None
@@ -1274,8 +1108,6 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#start_btn")
     def on_start(self):
-        """Re-run the whole queue: every non-pending entry (done / failed /
-        missing / error / stopped) is reset to pending before launching."""
         if self.batch_running:
             return
         for entry in self.scene_entries:
@@ -1289,8 +1121,6 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#stop_btn")
     def on_stop(self):
-        """Graceful stop: let the current case finish naturally, then exit
-        the batch. Pending cases remain pending so RESUME can pick up."""
         if not self.batch_running:
             return
         self.stop_requested = True
@@ -1301,9 +1131,6 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#force_stop_btn")
     def on_force_stop(self):
-        """Immediate stop: kill the running subprocess and every child it
-        spawned (taskkill /F /T on Windows). The current entry is marked
-        STOPPED (removable) instead of FAILED."""
         if not self.batch_running:
             return
         self.stop_requested = True
@@ -1314,9 +1141,6 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#resume_btn")
     def on_resume(self):
-        """Continue the batch: pending entries get processed, and any
-        force-stopped entries are re-queued first. Already finished cases
-        (done / failed / missing / error) stay as a record."""
         if self.batch_running:
             return
         for entry in self.scene_entries:
@@ -1325,22 +1149,17 @@ class BatchSimuApp(App):
         self.refresh_scene_queue()
         self._launch_batch()
 
-    # ---------- batch orchestration ----------
-
     def _launch_batch(self):
         if not self.scene_entries:
             self.log_line("No scene entries in the queue.", "error")
             return
-        # Only entries still pending will be processed; skip everything else.
         pending = [e for e in self.scene_entries if e.status == STATUS_PENDING]
         if not pending:
             self.log_line("No pending entries to run.", "warning")
             return
 
-        # Validate each pending entry still has its private batch_exe copy.
-        # The source exe may have been moved or deleted since Add - we don't
-        # need it anymore (the copy is the source of truth at run time) but
-        # the copy itself has to exist.
+        # The batch_exe copy is the source of truth at run time; the source
+        # exe may have been moved or deleted since Add, but the copy can't be.
         missing = [e for e in pending if not e.batch_exe_path or not os.path.isfile(e.batch_exe_path)]
         if missing:
             for e in missing:
@@ -1357,10 +1176,9 @@ class BatchSimuApp(App):
         self.force_stopped_current = False
         self.process_holder = []
 
-        # Switch BEFORE disabling start_btn / resume_btn. Disabling a focused
-        # button causes Textual to auto-move focus to the next focusable
-        # widget (still on the Setup tab) - which then competes with our
-        # tab switch and snaps the active back to Setup.
+        # Switch tab BEFORE disabling the focused button; otherwise Textual
+        # auto-moves focus to the next focusable widget on Setup, which
+        # competes with the tab switch and snaps the active back to Setup.
         self.switch_tab("running")
         self.query_one("#start_btn", Button).disabled = True
         self.query_one("#resume_btn", Button).disabled = True
@@ -1369,17 +1187,10 @@ class BatchSimuApp(App):
         self.query_one("#reset_btn", Button).disabled = True
         self.set_progress(0)
 
-        # Worker reads self.scene_entries live so cases Added mid-batch are
-        # picked up too.
         self._run_batch_worker()
 
     def _mark_status(self, entry: SceneEntry, status: str):
-        """Update the entry's status field and repaint the queue table.
-
-        Called from the worker thread via call_from_thread. ETA is only
-        meaningful while a case is actively running, so any non-RUNNING
-        transition also clears the cached ETA.
-        """
+        # ETA is only meaningful while RUNNING; clear on any other transition.
         entry.status = status
         if status != STATUS_RUNNING:
             entry.eta = None
@@ -1393,9 +1204,7 @@ class BatchSimuApp(App):
         total_warnings = 0
         total_errors = 0
         total_failures = 0
-        # Snapshot count for the start-of-batch Telegram digest only.
-        # The actual run loop reads self.scene_entries live so mid-batch
-        # Adds get processed too.
+        # Start-of-batch digest only; the run loop reads scene_entries live.
         runnable = sum(1 for e in self.scene_entries if e.status == STATUS_PENDING)
         total_initial = len(self.scene_entries)
 
@@ -1406,10 +1215,8 @@ class BatchSimuApp(App):
             sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in self.scene_entries if e.status == STATUS_PENDING})}")
             sim.tg.send_telegram_message_batch()
 
-            # Live cursor: each iteration re-reads len(self.scene_entries),
-            # so entries Added mid-batch extend this run instead of being
-            # deferred to the next START / RESUME. `i` stays 0-indexed to
-            # match the rest of the case-processing block below.
+            # Live cursor: each iteration re-reads len(self.scene_entries) so
+            # entries Added mid-batch extend this run.
             i = 0
             while True:
                 if self.stop_requested:
@@ -1418,14 +1225,9 @@ class BatchSimuApp(App):
                 if i >= len(self.scene_entries):
                     break
                 entry = self.scene_entries[i]
-                # Resume support: skip anything that's already been processed.
                 if entry.status != STATUS_PENDING:
                     i += 1
                     continue
-                # Snapshot the live total for this iteration's one-shot
-                # status / progress writes. Periodic refreshes below
-                # re-evaluate len(self.scene_entries) at 1 Hz, so any
-                # mid-case Add bumps the visible denominator.
                 total = len(self.scene_entries)
 
                 case_name = sim.case_name_from_path(entry.scene_path)
@@ -1468,7 +1270,6 @@ class BatchSimuApp(App):
                     i += 1
                     continue
 
-                # Compile the step / ETA regexes for this case's profile.
                 profile = sim.identify_profile(entry.exe_path)
                 step_pattern_str = profile_step_pattern(profile)
                 self.current_step_re = re.compile(step_pattern_str) if step_pattern_str else None
@@ -1477,17 +1278,11 @@ class BatchSimuApp(App):
 
                 self.process_holder.clear()
 
-                # Reset the per-case log buffer + ETA so a re-run via START
-                # or RESUME doesn't carry over the previous run's state.
                 entry.log_buffer = []
                 entry.eta = None
 
                 def on_line(line, kind, _entry=entry, _eta_re=eta_re):
                     _entry.log_buffer.append((line, kind))
-                    # Tick the entry's own warning / error counters as lines
-                    # come in so the queue table's Warnings / Errors columns
-                    # update live. The post-run assignment from result.* below
-                    # stays as the authoritative final value.
                     if kind == "warning":
                         _entry.warnings += 1
                         self.call_from_thread(self.refresh_scene_queue)
@@ -1504,10 +1299,7 @@ class BatchSimuApp(App):
                                 self.call_from_thread(self.refresh_scene_queue)
 
                 try:
-                    # Pass a live total getter rather than the snapshot
-                    # captured above, so any mid-case Add bumps the
-                    # '(index+1/total)' denominator in every Telegram /
-                    # log line for the rest of this case.
+                    # Live total so mid-case Adds bump the per-step denominator.
                     result = sim.run_case(
                         batch_exe, entry.scene_path, i,
                         lambda: len(self.scene_entries),
@@ -1531,8 +1323,7 @@ class BatchSimuApp(App):
                 total_errors += result.errors
 
                 if self.force_stopped_current:
-                    # Force-stop terminated the subprocess; categorise as STOPPED
-                    # (removable) instead of FAILED so the user can clean it up.
+                    # Force-stop -> STOPPED (removable), not FAILED.
                     self.force_stopped_current = False
                     entry.elapsed = -1
                     time_costs.append(-1)
@@ -1552,9 +1343,8 @@ class BatchSimuApp(App):
                                 tag="Case",
                             )
                         else:
-                            # Route 7z output through the log widget so its
-                            # raw ANSI/CR sequences don't bleed past the
-                            # Textual render and corrupt the TUI.
+                            # Route 7z output through the log so its ANSI/CR
+                            # doesn't corrupt the Textual render.
                             def zip_on_line(line, kind):
                                 self.call_from_thread(self.log_line, line, kind)
                             zipped = sim.zip_case_output(
@@ -1574,8 +1364,6 @@ class BatchSimuApp(App):
 
                 self.call_from_thread(self.finish_current_case)
                 self.call_from_thread(self._mark_status, entry, final_status)
-                # Re-read len so the post-case status reflects any
-                # mid-case Add that happened during this run.
                 self.call_from_thread(
                     self.set_status,
                     f"Done {i+1}/{len(self.scene_entries)} | "
@@ -1589,10 +1377,8 @@ class BatchSimuApp(App):
             sim.info("All done", tag="Batch")
 
         finally:
-            # Per-case batch_exe copies persist past batch end so START /
-            # RESUME can re-run the same entries with their original exe
-            # snapshot. They get cleaned up when the entry is Removed,
-            # on Reset, or on app unmount.
+            # batch_exe copies persist so START / RESUME can re-run with the
+            # original snapshot; cleanup happens on Remove / Reset / unmount.
             self.batch_running = False
             self.current_entry = None
             self.call_from_thread(self.reset_run_controls)

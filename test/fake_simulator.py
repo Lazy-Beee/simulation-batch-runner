@@ -25,8 +25,7 @@ from pathlib import Path
 
 
 def _format_eta(remaining_minutes):
-    """Format remaining time so the batch runner's eta_pattern can parse it.
-    Matches the SPlisHSPlasH/CAMMP display: `<1m`, `45m`, or `7h57m`."""
+    # Matches the SPlisHSPlasH / CAMMP display: '<1m', '45m', or '7h57m'.
     if remaining_minutes <= 0:
         return "<1m"
     if remaining_minutes < 60:
@@ -45,9 +44,7 @@ def run_synthetic(scene, scene_path):
     print(f"Fake simulator | scene: {scene_path}", flush=True)
     print(f"Total steps: {steps}, step time: {step_time:.3f}s", flush=True)
 
-    # Optional dummy output folder so the TUI/CLI zip + remove pipeline has
-    # something real to operate on. Path is anchored to the scene file's
-    # parent dir so test runs don't litter the cwd.
+    # Anchor dummy output beside the scene so test runs don't litter cwd.
     output_files = int(scene.get("output_files", 0))
     output_file_size = int(scene.get("output_file_size", 1024))
     if output_files > 0:

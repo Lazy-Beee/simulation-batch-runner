@@ -496,6 +496,22 @@ class BatchSimuApp(App):
             entry = self.current_entry
             if entry is not None and entry.status == STATUS_RUNNING:
                 entry.elapsed = elapsed
+                # Re-render the "Case N/M" labels with the latest queue
+                # length so mid-case Adds aren't stuck displaying the
+                # snapshot total taken at case start. Locate i by
+                # object identity rather than dataclass equality so two
+                # entries with the same fields can't shadow each other.
+                idx = next(
+                    (j for j, e in enumerate(self.scene_entries) if e is entry),
+                    -1,
+                )
+                if idx >= 0:
+                    total = len(self.scene_entries)
+                    case_name = self.simulator.case_name_from_path(entry.scene_path)
+                    self.set_status(f"Case {idx+1}/{total}: {case_name}")
+                    self.query_one("#current_case_label", Static).update(
+                        f"Case: {case_name} ({idx+1}/{total})"
+                    )
         # Always re-render the queue so file-existence changes (a
         # simulator / scene file removed or moved after Add) update the
         # `[!]` marker promptly even while idle, and so any other stale
@@ -950,6 +966,16 @@ class BatchSimuApp(App):
             except Exception:
                 pass
         else:
+            # Announce queue growth that happens while a batch is
+            # already running, so the Telegram digest's "(i+1/total)"
+            # jump from the original snapshot to the new live total
+            # isn't a mystery to anyone reading the chat.
+            if self.batch_running:
+                self.simulator.info(
+                    f"Queue extended mid-batch: +{added} case(s), "
+                    f"now {len(self.scene_entries)} total",
+                    tag="Batch",
+                )
             self.refresh_scene_queue()
         inp.value = ""
         inp.focus()
@@ -1396,6 +1422,10 @@ class BatchSimuApp(App):
                 if entry.status != STATUS_PENDING:
                     i += 1
                     continue
+                # Snapshot the live total for this iteration's one-shot
+                # status / progress writes. Periodic refreshes below
+                # re-evaluate len(self.scene_entries) at 1 Hz, so any
+                # mid-case Add bumps the visible denominator.
                 total = len(self.scene_entries)
 
                 case_name = sim.case_name_from_path(entry.scene_path)
@@ -1474,8 +1504,14 @@ class BatchSimuApp(App):
                                 self.call_from_thread(self.refresh_scene_queue)
 
                 try:
+                    # Pass a live total getter rather than the snapshot
+                    # captured above, so any mid-case Add bumps the
+                    # '(index+1/total)' denominator in every Telegram /
+                    # log line for the rest of this case.
                     result = sim.run_case(
-                        batch_exe, entry.scene_path, i, total, entry.mpi_ranks,
+                        batch_exe, entry.scene_path, i,
+                        lambda: len(self.scene_entries),
+                        entry.mpi_ranks,
                         on_line=on_line, process_holder=self.process_holder,
                     )
                 except Exception as e:
@@ -1538,9 +1574,11 @@ class BatchSimuApp(App):
 
                 self.call_from_thread(self.finish_current_case)
                 self.call_from_thread(self._mark_status, entry, final_status)
+                # Re-read len so the post-case status reflects any
+                # mid-case Add that happened during this run.
                 self.call_from_thread(
                     self.set_status,
-                    f"Done {i+1}/{total} | "
+                    f"Done {i+1}/{len(self.scene_entries)} | "
                     f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
                 )
                 self.current_entry = None

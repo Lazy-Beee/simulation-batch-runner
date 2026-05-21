@@ -219,13 +219,18 @@ class Simulator:
         exe_path: str,
         file_path: str,
         index: int,
-        total: int,
+        total,
         mpi_ranks: int = 0,
         on_line: Optional[Callable[[str, str], None]] = None,
         process_holder: Optional[List] = None,
     ) -> CaseResult:
         """Run a single simulation case.
 
+        total: either a fixed int or a zero-arg callable. A callable is
+            re-evaluated for every '(index+1/total)' formatting so
+            front-ends that can grow the queue while a case is running
+            (the TUI's mid-batch Add) see a live denominator instead of
+            a stale snapshot taken at case start.
         on_line(line, kind): called per stdout line with the full original line.
             kind is the most-specific match: "step" (line contains the configured
             simulator profile's step_pattern), "error" ("[ERROR]"),
@@ -242,9 +247,12 @@ class Simulator:
         step_pattern_str = profile_step_pattern(self.identify_profile(exe_path))
         step_re = re.compile(step_pattern_str) if step_pattern_str else None
 
-        self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{total}):")
+        def _t():
+            return total() if callable(total) else total
+
+        self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{_t()}):")
         self.info(
-            f"Processing '{case_name}' with '{os.path.basename(exe_path)}' ({index+1}/{total})",
+            f"Processing '{case_name}' with '{os.path.basename(exe_path)}' ({index+1}/{_t()})",
             tag="Case",
         )
 
@@ -279,7 +287,7 @@ class Simulator:
                 else:
                     line_processed = line[step_match.start():].rstrip()
                 self.tg.send_message(
-                    f"({index+1}/{total}) {line_processed}",
+                    f"({index+1}/{_t()}) {line_processed}",
                     tag="Case",
                 )
                 if on_line:

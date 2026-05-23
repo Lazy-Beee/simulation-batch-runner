@@ -68,7 +68,7 @@ QUEUE_COLS = [
     ("Rmv", 5),
     ("Status", 10),
     ("Time", 10),
-    ("ETA", 9),
+    ("ETA", 10),
     ("Warnings", 9),
     ("Errors", 7),
 ]
@@ -508,27 +508,34 @@ class BatchSimuApp(App):
 
     @staticmethod
     def _fmt_time(elapsed: Optional[int]) -> str:
+        # H:MM:SS left-flush; column ljust pads the trailing space. Sidesteps
+        # timedelta's "X days, ..." rollover so anything < 1000h fits the cell.
         if elapsed is None or elapsed < 0:
             return "-"
-        return str(datetime.timedelta(seconds=elapsed))
+        h, rem = divmod(int(elapsed), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}"
 
     @staticmethod
     def _fmt_eta(eta_token: Optional[str]) -> str:
-        # Accepts '<1m', 'XhYm', 'Xh Ym' (CAMMP), or 'Xm' (Xm >= 60 carries
-        # into hours). Anything else is returned verbatim.
+        # Match _fmt_time's left-flush H:MM:SS format so Time and ETA line up.
+        # Accepts '<1m', 'XhYm', 'Xh Ym' (CAMMP), or 'Xm' (>=60 carries).
         if not eta_token:
             return "-"
         eta_token = eta_token.strip()
         if eta_token == "<1m":
-            return "0:00:00"
-        m = re.match(r"(\d+)h\s*(\d+)m\Z", eta_token)
-        if m:
-            return f"{int(m.group(1))}:{int(m.group(2)):02d}:00"
-        m = re.match(r"(\d+)m\Z", eta_token)
-        if m:
-            h, mm = divmod(int(m.group(1)), 60)
-            return f"{h}:{mm:02d}:00"
-        return eta_token
+            h, mm = 0, 0
+        else:
+            m = re.match(r"(\d+)h\s*(\d+)m\Z", eta_token)
+            if m:
+                h, mm = int(m.group(1)), int(m.group(2))
+            else:
+                m = re.match(r"(\d+)m\Z", eta_token)
+                if m:
+                    h, mm = divmod(int(m.group(1)), 60)
+                else:
+                    return eta_token
+        return f"{h}:{mm:02d}:00"
 
     def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str, str]:
         case_line = f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"

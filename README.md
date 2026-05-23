@@ -28,7 +28,7 @@ Two frontends share the same core (`simulation.py`):
      - `path_marker` — case-insensitive substring matched against the exe path
      - `supports_mpi` — `false` disables MPI controls and skips the MPI prompt
      - `step_pattern` — Python regex (`re.search`) matching a step / progress line in stdout. Capture group 1 (if present) is the display text; otherwise the text from the first match position is shown. Drives the Running tab's step indicator and per-step Telegram messages. Escape regex metacharacters: SPlisHSPlasH's literal `[step]` becomes `\\[step\\]`.
-     - `eta_pattern` (optional) — Python regex with one capture group; applied to every step line to extract an ETA token (e.g. `7h57m`, `1h 01m`, `<1m`). The captured value is reformatted as `H:MM:SS` in the queue table's **ETA** column. Omit to disable ETA extraction for this profile.
+     - `eta_pattern` (optional) — Python regex with one capture group; applied to every step line to extract an ETA token (e.g. `7h57m`, `1h 01m`, `<1m`). The captured value is reformatted as `H:MM:SS` (matching the **Time** column) in the queue table's **ETA** column. Omit to disable ETA extraction for this profile.
      - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; re-applied only when the matched profile *transitions*
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` for notifications
 

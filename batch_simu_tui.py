@@ -806,7 +806,11 @@ class BatchSimuApp(App):
         if not text:
             return
         try:
-            paths = shlex.split(text)
+            # posix=False so Windows-style backslashes survive (POSIX mode
+            # treats them as escape chars and silently eats them, turning
+            # C:\Users\foo into C:Usersfoo). strip_quotes below handles the
+            # quote tokens that posix=False leaves in.
+            paths = shlex.split(text, posix=False)
         except ValueError as e:
             self.log_line(f"Error parsing input: {e}", "error")
             return

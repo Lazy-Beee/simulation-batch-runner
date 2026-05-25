@@ -70,11 +70,15 @@ def prompt_files() -> list:
         if not text:
             break
         try:
-            paths = shlex.split(text)
+            # posix=False keeps Windows backslashes intact (POSIX mode would
+            # eat them as escape chars). Outer quote tokens get stripped below.
+            paths = shlex.split(text, posix=False)
         except ValueError as e:
             print(f"Error parsing input: {e}")
             continue
         for p in paths:
+            if len(p) >= 2 and p[0] == p[-1] and p[0] in ('"', "'"):
+                p = p[1:-1]
             if not os.path.exists(p):
                 print(f"File '{p}' not found.")
             files.append(p)

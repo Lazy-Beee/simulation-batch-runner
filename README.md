@@ -88,8 +88,9 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
 6. **Row actions** — with a row selected (cursor on it):
    - **Up / Down** — reorder pending entries. Running / finished rows are locked in place; pending rows can't jump over a non-pending neighbour.
    - **View log** — opens (or switches to) a new tab replaying that case's captured log. Only available for finished cases (done / failed / stopped / missing / error); pending / running rows are rejected with a hint. Close the tab with its Close button or `Ctrl+W`.
-   - **Remove selected** — drops the row. Allowed for pending and stopped only; done / failed / etc. stay as a record.
-7. **Run controls** — bottom row:
+   - **Remove selected** — drops the row. Allowed for pending and stopped only; done / failed / etc. stay as a record. If any rows are multi-selected (see below) it removes all of them instead.
+7. **Multi-select** — `Space` toggles a checkmark (`*`) in the `#` column for the cursor row. While anything is multi-selected, the row actions switch to bulk mode: **Remove selected** drops every removable entry in the selection, **Up / Down** moves the whole group as a unit (rows that hit a boundary or a non-pending neighbour stay put while the rest still shift), and **View log** opens one tab per finished entry (pending / running members are silently skipped). `Ctrl+A` selects every row, `Esc` clears the selection.
+8. **Run controls** — bottom row:
    - **START** — resets every non-pending entry back to pending (clearing previous `Time` / `Warnings` / `Errors`) and runs the whole queue.
    - **STOP** — graceful: the current case finishes naturally, then the batch exits. Remaining pending cases stay pending.
    - **FORCE STOP** — kills the current process tree (`taskkill /F /T` on Windows). The in-flight entry is marked `stopped` (removable).
@@ -114,6 +115,8 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | `Ctrl+W` | Close current case tab (Queue / Running are pinned) — hidden from Footer; inside an Input it's the Input's own delete-word |
 | `Ctrl+Q` | Quit |
 | `F1` / `F2` | Jump to Queue / Running |
+| `Space` | Toggle multi-select on the cursor row |
+| `Ctrl+A` / `Esc` | Select all / clear selection (hidden from Footer) |
 
 ## Usage — CLI
 

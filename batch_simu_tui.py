@@ -59,7 +59,7 @@ ROW_STYLE_BY_STATUS = {
 }
 
 QUEUE_COLS = [
-    ("#", 4),
+    ("#", 5),
     ("Simulator", 22),
     ("Scene", 26),
     ("OMP", 5),
@@ -297,6 +297,9 @@ class BatchSimuApp(App):
         Binding("f1", "show_tab('setup')", "Queue"),
         Binding("f2", "show_tab('running')", "Running"),
         Binding("ctrl+w", "close_tab", "Close case tab", show=False),
+        Binding("space", "toggle_select", "Select row"),
+        Binding("ctrl+a", "select_all", "Select all", show=False),
+        Binding("escape", "clear_selection", "Clear selection", show=False),
     ]
 
     def __init__(self):
@@ -323,6 +326,10 @@ class BatchSimuApp(App):
         # previous one is being archived. Drained at batch end.
         self._zip_queue: queue.Queue = queue.Queue()
         self._zip_worker: Optional[threading.Thread] = None
+
+        # Multi-select for the queue table. Stores id(entry) so stale row
+        # indices after reorder / remove don't shadow current selections.
+        self._selected_ids: set[int] = set()
 
         # Drag-drop / paste target. Tracked from focus events instead of
         # App.focused or mouse_over because OLE drag-drop is modal on
@@ -632,8 +639,9 @@ class BatchSimuApp(App):
             if missing:
                 scene_disp += " [!]"
             sty = ROW_STYLE_BY_STATUS.get(e.status, "")
+            marker = "*" if id(e) in self._selected_ids else " "
             values = [
-                str(i + 1),
+                f"{marker} {i + 1}",
                 self._short(e.exe_path, sim_w - 1),
                 scene_disp,
                 self._fmt_omp(e.omp_threads),
@@ -880,6 +888,27 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#view_log_btn")
     async def on_view_log(self):
+        if self._selected_ids:
+            targets = [e for e in self.scene_entries if id(e) in self._selected_ids]
+            eligible = [
+                e for e in targets if e.status not in (STATUS_PENDING, STATUS_RUNNING)
+            ]
+            skipped = len(targets) - len(eligible)
+            if not eligible:
+                self.log_line(
+                    "Selection has no finished entries; nothing to open.",
+                    "warning",
+                )
+                return
+            for entry in eligible:
+                await self._open_case_tab(entry)
+            if skipped:
+                self.log_line(
+                    f"Opened {len(eligible)} log tab(s); skipped {skipped} pending / running entry(s).",
+                    "info",
+                )
+            return
+
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
@@ -952,6 +981,25 @@ class BatchSimuApp(App):
 
     @on(Button.Pressed, "#remove_btn")
     def on_remove(self):
+        if self._selected_ids:
+            targets = [
+                e for e in self.scene_entries
+                if id(e) in self._selected_ids and e.status in REMOVABLE_STATUSES
+            ]
+            if not targets:
+                self.log_line(
+                    "Selection has no removable entries (only pending / stopped can go).",
+                    "warning",
+                )
+                return
+            for entry in targets:
+                self._cleanup_entry_exe(entry)
+                self.scene_entries.remove(entry)
+                self._selected_ids.discard(id(entry))
+            self.refresh_scene_queue()
+            self.log_line(f"Removed {len(targets)} selected entries.", "info")
+            return
+
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
@@ -992,6 +1040,11 @@ class BatchSimuApp(App):
 
     def _move_selected(self, delta: int):
         # Only pending entries can be reordered, and not past a non-pending row.
+        # Multi-select moves every selected entry as a group; any that hit a
+        # boundary or barrier stay where they are while the rest still shift.
+        if self._selected_ids:
+            self._move_selected_group(delta)
+            return
         table = self.query_one("#scene_queue", DataTable)
         idx = table.cursor_row
         if idx is None or not (0 <= idx < len(self.scene_entries)):
@@ -1013,6 +1066,42 @@ class BatchSimuApp(App):
         if 0 <= new_idx < table.row_count:
             table.move_cursor(row=new_idx)
 
+    def _move_selected_group(self, delta: int):
+        selected = [
+            i for i, e in enumerate(self.scene_entries) if id(e) in self._selected_ids
+        ]
+        if not selected:
+            return
+        # Process the leading edge first so swaps don't trample each other:
+        # top-to-bottom for Up, bottom-to-top for Down.
+        order = sorted(selected) if delta < 0 else sorted(selected, reverse=True)
+        moved = 0
+        for idx in order:
+            new_idx = idx + delta
+            if not (0 <= new_idx < len(self.scene_entries)):
+                continue
+            if self.scene_entries[idx].status != STATUS_PENDING:
+                continue
+            target = self.scene_entries[new_idx]
+            if target.status != STATUS_PENDING:
+                continue
+            # Skip swaps where the target is also selected - that's two members
+            # of the group trading places, no net movement for the group.
+            if id(target) in self._selected_ids:
+                continue
+            self.scene_entries[idx], self.scene_entries[new_idx] = (
+                self.scene_entries[new_idx],
+                self.scene_entries[idx],
+            )
+            moved += 1
+        if moved == 0:
+            self.log_line(
+                "Nothing to move - selection is blocked by boundary or non-pending neighbours.",
+                "warning",
+            )
+            return
+        self.refresh_scene_queue()
+
     @on(Button.Pressed, "#reset_btn")
     async def on_reset(self):
         if self.batch_running:
@@ -1024,6 +1113,7 @@ class BatchSimuApp(App):
             self._cleanup_entry_exe(entry)
         await self._close_all_case_tabs()
         self.scene_entries.clear()
+        self._selected_ids.clear()
         self.refresh_scene_queue()
         self.set_status("Idle")
         self.set_progress(0)
@@ -1122,6 +1212,28 @@ class BatchSimuApp(App):
 
     def action_show_tab(self, tab_id: str):
         self.switch_tab(tab_id)
+
+    def action_toggle_select(self):
+        table = self.query_one("#scene_queue", DataTable)
+        idx = table.cursor_row
+        if idx is None or not (0 <= idx < len(self.scene_entries)):
+            return
+        eid = id(self.scene_entries[idx])
+        if eid in self._selected_ids:
+            self._selected_ids.discard(eid)
+        else:
+            self._selected_ids.add(eid)
+        self.refresh_scene_queue()
+
+    def action_select_all(self):
+        self._selected_ids = {id(e) for e in self.scene_entries}
+        self.refresh_scene_queue()
+
+    def action_clear_selection(self):
+        if not self._selected_ids:
+            return
+        self._selected_ids.clear()
+        self.refresh_scene_queue()
 
     @staticmethod
     def _reset_entry_run_state(entry: SceneEntry):

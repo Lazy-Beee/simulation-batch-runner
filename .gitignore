@@ -1,6 +1,7 @@
 config.json
 __pycache__/
 *.pyc
+*.ini
 
 # Per-case batch_exe copies created at queue Add time. prepare_exe names
 # them <base>.batch<ext> on the first copy and <base>.batch.<n><ext> for

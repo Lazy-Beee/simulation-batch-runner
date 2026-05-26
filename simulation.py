@@ -152,6 +152,10 @@ class Simulator:
         self.zip_path = sim.get("zip_path", "")
         self.zip_ext = sim.get("zip_ext", ".zip")
         self.zip_args: List[str] = list(sim.get("zip_args", []))
+        # When True (default), the TUI runs zip + remove on a background
+        # thread so the next case can start immediately. False forces the
+        # batch worker to wait for each archive before moving on.
+        self.zip_async = bool(sim.get("zip_async", True))
 
         defaults = config.get("defaults", {})
         self.default_omp_threads = defaults.get("omp_threads", 24)

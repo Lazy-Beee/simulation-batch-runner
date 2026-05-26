@@ -22,6 +22,7 @@ Two frontends share the same core (`simulation.py`):
    - `simulator.zip_path` — path to `7z.exe`
    - `simulator.zip_ext` (optional) — archive file extension; 7z picks the format from this (`.7z` for LZMA2, `.zip` for Deflate). Defaults to `.zip`.
    - `simulator.zip_args` (optional) — extra switches passed to 7z between `a` and the archive name. Defaults to `["-mx=5", "-mmt=on"]` (7z's own defaults, made explicit). Common tweaks: `-mx=1` (fastest) / `-mx=9` (max compression), `-mmt=N` to cap thread count, `[]` to keep 7z's defaults silent.
+   - `simulator.zip_async` (optional, TUI only) — `true` (default) runs zip + remove on a background thread so the next case starts immediately. Set to `false` to make each case's zip block the queue until done.
    - `defaults.omp_threads` / `defaults.mpi_ranks` — fallback values used when a switch is on but its numeric input is blank
    - `simulator_profiles[]` — one entry per simulator family:
      - `name` — display label
@@ -144,7 +145,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 - Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
 - `stdout` is streamed live and parsed for the matched profile's `step_pattern`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
-- (TUI only) Zip and remove run on a background thread, so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk. The batch waits for any remaining zip / remove tasks before declaring idle.
+- (TUI only) When `simulator.zip_async` is `true` (default), zip and remove run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / remove block the queue (next case waits).
 - Telegram digest at batch end summarises per-case time costs and totals.
 
 ## Requirements

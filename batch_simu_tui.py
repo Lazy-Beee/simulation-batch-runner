@@ -1518,12 +1518,18 @@ class BatchSimuApp(App):
                 if result.returncode == 0:
                     entry.elapsed = result.elapsed
                     time_costs.append(result.elapsed)
-                    # Enqueue zip + remove so the next case can start while
-                    # this one is being archived. Drained at batch end.
-                    self._zip_queue.put((
-                        case_name, result.output_folder,
-                        entry.zip_output, entry.remove_output,
-                    ))
+                    # Async: enqueue and move on; the zip-worker drains.
+                    # Sync: run inline so the next case waits for the archive.
+                    if sim.zip_async:
+                        self._zip_queue.put((
+                            case_name, result.output_folder,
+                            entry.zip_output, entry.remove_output,
+                        ))
+                    else:
+                        self._run_zip_task(
+                            case_name, result.output_folder,
+                            entry.zip_output, entry.remove_output,
+                        )
                     final_status = STATUS_DONE
                 else:
                     entry.elapsed = -1

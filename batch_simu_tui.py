@@ -35,6 +35,7 @@ import re
 from simulation import (
     Simulator, load_config,
     profile_name, profile_supports_mpi, profile_step_pattern, profile_eta_pattern,
+    CLEANUP_KEEP, CLEANUP_FOLDER, CLEANUP_BOTH,
 )
 
 
@@ -58,6 +59,11 @@ ROW_STYLE_BY_STATUS = {
     STATUS_STOPPED: "on grey35",
 }
 
+# Cleanup control: cycle order, Add-row button label, queue-column label.
+CLEANUP_CYCLE = [CLEANUP_KEEP, CLEANUP_FOLDER, CLEANUP_BOTH]
+CLEANUP_BTN_LABEL = {CLEANUP_KEEP: "Keep", CLEANUP_FOLDER: "Folder", CLEANUP_BOTH: "Both"}
+CLEANUP_COL = {CLEANUP_KEEP: "keep", CLEANUP_FOLDER: "fldr", CLEANUP_BOTH: "both"}
+
 QUEUE_COLS = [
     ("#", 5),
     ("Simulator", 22),
@@ -65,7 +71,7 @@ QUEUE_COLS = [
     ("OMP", 5),
     ("MPI", 5),
     ("Zip", 5),
-    ("Rmv", 5),
+    ("Clean", 6),
     ("Upl", 5),
     ("Status", 10),
     ("Time", 10),
@@ -153,7 +159,7 @@ class SceneEntry:
     omp_threads: Optional[int]   # None = no OMP limit
     mpi_ranks: int               # 0 = MPI disabled
     zip_output: bool
-    remove_output: bool
+    cleanup: str
     upload_output: bool
     status: str = STATUS_PENDING
     returncode: Optional[int] = None
@@ -309,6 +315,7 @@ class BatchSimuApp(App):
         self.config = load_config()
         self.simulator = Simulator(self.config)
         self.scene_entries: list[SceneEntry] = []
+        self.add_cleanup = self.simulator.default_cleanup   # current Add-row Cleanup choice
         self.process_holder: list = []
         self.stop_requested = False
         self.force_stopped_current = False   # set by FORCE STOP; consumed by worker
@@ -376,10 +383,9 @@ class BatchSimuApp(App):
                             value=str(self.simulator.default_mpi_ranks),
                             id="mpi_input", classes="narrow", type="integer",
                         )
-                        yield Switch(value=True, id="zip_switch")
+                        yield Switch(value=self.simulator.default_zip, id="zip_switch")
                         yield Label("Zip")
-                        yield Switch(value=True, id="remove_switch")
-                        yield Label("Remove")
+                        yield Button(f"Clean: {CLEANUP_BTN_LABEL[self.add_cleanup]}", id="cleanup_btn")
                         yield Switch(value=self.simulator.upload_enabled, id="upload_switch")
                         yield Label("Upload")
                         yield Button("Add", id="add_btn", variant="primary")
@@ -651,7 +657,7 @@ class BatchSimuApp(App):
                 self._fmt_omp(e.omp_threads),
                 self._fmt_mpi(e.mpi_ranks),
                 self._fmt_bool(e.zip_output),
-                self._fmt_bool(e.remove_output),
+                CLEANUP_COL.get(e.cleanup, e.cleanup),
                 self._fmt_bool(e.upload_output),
                 status_display(e),
                 self._fmt_time(e.elapsed),
@@ -787,6 +793,15 @@ class BatchSimuApp(App):
     def on_add(self):
         self._add_from_input()
 
+    @on(Button.Pressed, "#cleanup_btn")
+    def on_cycle_cleanup(self):
+        # Cycle Keep -> Folder -> Both. 'Both' (delete the archive too) only
+        # actually drops the archive when Upload is on and succeeds; the
+        # batch worker keeps it otherwise, so selecting it here is always safe.
+        idx = CLEANUP_CYCLE.index(self.add_cleanup)
+        self.add_cleanup = CLEANUP_CYCLE[(idx + 1) % len(CLEANUP_CYCLE)]
+        self.query_one("#cleanup_btn", Button).label = f"Clean: {CLEANUP_BTN_LABEL[self.add_cleanup]}"
+
     @on(Input.Submitted, "#add_file_input")
     def on_add_submit(self):
         self._add_from_input()
@@ -842,7 +857,7 @@ class BatchSimuApp(App):
         if not profile_supports_mpi(self.simulator.identify_profile(exe_path)):
             mpi = 0
         zip_out = self.query_one("#zip_switch", Switch).value
-        rm_out = self.query_one("#remove_switch", Switch).value
+        cleanup = self.add_cleanup
         up_out = self.query_one("#upload_switch", Switch).value
 
         # All entries from one Add share a single exe snapshot. Snapshots only
@@ -866,7 +881,7 @@ class BatchSimuApp(App):
                 omp_threads=omp,
                 mpi_ranks=mpi,
                 zip_output=zip_out,
-                remove_output=rm_out,
+                cleanup=cleanup,
                 upload_output=up_out,
                 batch_exe_path=shared_batch_exe,
             )
@@ -1341,8 +1356,9 @@ class BatchSimuApp(App):
         self.refresh_scene_queue()
 
     def _zip_worker_loop(self):
-        # Tasks are (case_name, output_folder, do_zip, do_remove). Worker
-        # serialises them so we don't thrash disk with parallel 7z runs.
+        # Tasks are (case_name, output_folder, do_zip, cleanup, do_upload).
+        # Worker serialises them so we don't thrash disk with parallel 7z
+        # runs (and so uploads don't overlap either).
         while True:
             try:
                 task = self._zip_queue.get()
@@ -1351,8 +1367,8 @@ class BatchSimuApp(App):
             try:
                 if task is None:
                     return
-                case_name, output_folder, do_zip, do_remove, do_upload = task
-                self._run_zip_task(case_name, output_folder, do_zip, do_remove, do_upload)
+                case_name, output_folder, do_zip, cleanup, do_upload = task
+                self._run_zip_task(case_name, output_folder, do_zip, cleanup, do_upload)
             except Exception as e:
                 try:
                     self.call_from_thread(
@@ -1364,13 +1380,13 @@ class BatchSimuApp(App):
                 self._zip_queue.task_done()
 
     def _run_zip_task(self, case_name: str, output_folder: Optional[str],
-                      do_zip: bool, do_remove: bool, do_upload: bool):
+                      do_zip: bool, cleanup: str, do_upload: bool):
         sim = self.simulator
         if not do_zip:
             return
         if not output_folder:
             sim.info(
-                f"No output directory detected in log for '{case_name}'; skipping zip/remove/upload.",
+                f"No output directory detected in log for '{case_name}'; skipping zip/upload/cleanup.",
                 tag="Case",
             )
             return
@@ -1379,17 +1395,13 @@ class BatchSimuApp(App):
             self.call_from_thread(self.log_line, line, kind)
 
         zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
-        # Upload the archive before removing the raw folder. The local
-        # archive itself is kept regardless of the upload outcome.
+        # Upload before cleanup so 'Both' can safely drop the local archive
+        # only once the upload has actually landed.
+        archive = f"{output_folder}{sim.zip_ext}"
+        uploaded = False
         if zipped and do_upload:
-            sim.upload_case_output(
-                case_name, f"{output_folder}{sim.zip_ext}", on_line=zip_on_line,
-            )
-        if do_remove:
-            if zipped:
-                sim.remove_case_output(case_name, output_folder)
-            else:
-                sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
+            uploaded = sim.upload_case_output(case_name, archive, on_line=zip_on_line)
+        sim.cleanup_case(case_name, output_folder, archive, cleanup, zipped, uploaded)
 
     @work(thread=True, exclusive=True)
     def _run_batch_worker(self):
@@ -1536,12 +1548,12 @@ class BatchSimuApp(App):
                     if sim.zip_async:
                         self._zip_queue.put((
                             case_name, result.output_folder,
-                            entry.zip_output, entry.remove_output, entry.upload_output,
+                            entry.zip_output, entry.cleanup, entry.upload_output,
                         ))
                     else:
                         self._run_zip_task(
                             case_name, result.output_folder,
-                            entry.zip_output, entry.remove_output, entry.upload_output,
+                            entry.zip_output, entry.cleanup, entry.upload_output,
                         )
                     final_status = STATUS_DONE
                 else:

@@ -25,7 +25,9 @@
   ],
   "defaults": {
     "omp_threads": 24,
-    "mpi_ranks": 4
+    "mpi_ranks": 4,
+    "zip": true,
+    "cleanup": "folder"
   },
   "telegram": {
     "enabled": false,

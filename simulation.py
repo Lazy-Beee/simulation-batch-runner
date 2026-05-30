@@ -23,6 +23,15 @@ def _app_root() -> Path:
 
 CONFIG_PATH = _app_root() / "config.json"
 
+# Local-artifact retention applied after zip (+ optional upload):
+#   keep   - keep the raw output folder and the archive
+#   folder - delete the raw output folder, keep the archive
+#   both   - delete the folder and the archive (the archive only after a
+#            successful upload, so we never drop the sole remaining copy)
+CLEANUP_KEEP = "keep"
+CLEANUP_FOLDER = "folder"
+CLEANUP_BOTH = "both"
+
 
 def load_config():
     if not CONFIG_PATH.is_file():
@@ -158,9 +167,9 @@ class Simulator:
         self.zip_async = bool(sim.get("zip_async", True))
 
         # Optional post-zip upload of the archive to a cloud remote via
-        # rclone. Runs after a successful zip and before remove; the local
-        # archive is always left in place (only the raw output folder is
-        # ever removed). On the TUI this rides the same async zip worker.
+        # rclone. Runs after a successful zip and before cleanup; on the TUI
+        # this rides the same async zip worker. See cleanup_case for how the
+        # archive is retained or removed afterwards.
         up = config.get("upload", {})
         self.upload_enabled = bool(up.get("enabled", False))
         self.rclone_path = up.get("rclone_path", "rclone")
@@ -170,6 +179,10 @@ class Simulator:
         defaults = config.get("defaults", {})
         self.default_omp_threads = defaults.get("omp_threads", 24)
         self.default_mpi_ranks = defaults.get("mpi_ranks", 4)
+        # TUI Add-row defaults for output handling.
+        self.default_zip = bool(defaults.get("zip", True))
+        cleanup = str(defaults.get("cleanup", CLEANUP_FOLDER)).lower()
+        self.default_cleanup = cleanup if cleanup in (CLEANUP_KEEP, CLEANUP_FOLDER, CLEANUP_BOTH) else CLEANUP_FOLDER
 
         self.profiles: List[dict] = list(config.get("simulator_profiles", []))
 
@@ -412,6 +425,41 @@ class Simulator:
             self.info(f"Removed output of case '{case_name}'", tag="Case")
         except Exception as e:
             self.info(f"Error while deleting output of case '{case_name}': {e}", tag="Case")
+
+    def remove_case_archive(self, case_name: str, zip_file: str):
+        try:
+            os.remove(zip_file)
+            self.info(f"Removed local archive of case '{case_name}'", tag="Case")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            self.info(f"Error while deleting archive of case '{case_name}': {e}", tag="Case")
+
+    def cleanup_case(self, case_name: str, output_folder: str, zip_file: str,
+                     cleanup: str, zipped: bool, uploaded: bool):
+        """Apply the local-artifact retention policy after zip / upload.
+
+        cleanup is one of CLEANUP_KEEP / CLEANUP_FOLDER / CLEANUP_BOTH:
+          keep   - nothing is deleted.
+          folder - the raw output folder is removed.
+          both   - the folder is removed, plus the local archive - but the
+                   archive only when an upload actually succeeded, so we
+                   never delete the sole remaining copy.
+
+        A failed zip (zipped is False) cancels all deletion: the raw data is
+        left in place to retry.
+        """
+        if cleanup not in (CLEANUP_FOLDER, CLEANUP_BOTH):
+            return
+        if not zipped:
+            self.info(f"Cleanup cancelled for case '{case_name}' (zip failed)", tag="Case")
+            return
+        self.remove_case_output(case_name, output_folder)
+        if cleanup == CLEANUP_BOTH:
+            if uploaded:
+                self.remove_case_archive(case_name, zip_file)
+            else:
+                self.info(f"Kept local archive of case '{case_name}' (no successful upload)", tag="Case")
 
     def send_batch_report(self, case_names, time_costs, total_failures, total_errors, total_warnings):
         self.tg.queue_message("#Batch Process summary:")

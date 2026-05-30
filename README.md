@@ -23,12 +23,14 @@ Two frontends share the same core (`simulation.py`):
    - `simulator.zip_ext` (optional) — archive file extension; 7z picks the format from this (`.7z` for LZMA2, `.zip` for Deflate). Defaults to `.zip`.
    - `simulator.zip_args` (optional) — extra switches passed to 7z between `a` and the archive name. Defaults to `["-mx=5", "-mmt=on"]` (7z's own defaults, made explicit). Common tweaks: `-mx=1` (fastest) / `-mx=9` (max compression), `-mmt=N` to cap thread count, `[]` to keep 7z's defaults silent.
    - `simulator.zip_async` (optional, TUI only) — `true` (default) runs zip + remove (and upload) on a background thread so the next case starts immediately. Set to `false` to make each case's zip block the queue until done.
-   - `upload` (optional) — post-zip upload of each case archive to a cloud remote via [rclone](https://rclone.org/). Runs after a successful zip and before the raw folder is removed; the local archive is always kept regardless of upload outcome.
+   - `upload` (optional) — post-zip upload of each case archive to a cloud remote via [rclone](https://rclone.org/). Runs after a successful zip and before cleanup; the local archive is kept unless a case's **Cleanup** is set to `Both` (and only then once the upload has actually succeeded — see the Queue workflow below).
      - `enabled` — `false` (default) disables uploading entirely. When `true`, the TUI's per-case **Upload** switch defaults on.
      - `rclone_path` — path to the `rclone` executable (just `"rclone"` if it's on PATH).
      - `remote` — rclone destination, e.g. `"gdrive:batch_output/"`. The archive is copied here keeping its file name (`rclone copy`); set up the remote once with `rclone config` (a one-time OAuth authorization for Google Drive).
      - `args` (optional) — extra switches passed to rclone between `copy` and the source path, e.g. `["--bwlimit", "8M"]` to cap bandwidth or `["--stats-one-line", "-v", "--stats", "30s"]` for periodic progress lines in the log.
    - `defaults.omp_threads` / `defaults.mpi_ranks` — fallback values used when a switch is on but its numeric input is blank
+   - `defaults.zip` (optional, TUI Add-row default) — initial state of the Zip switch. Defaults to `true`.
+   - `defaults.cleanup` (optional, TUI Add-row default) — initial Cleanup policy: `"keep"`, `"folder"` (default), or `"both"`. With `upload.enabled: true` this gives the out-of-the-box default of upload + keep archive + delete raw folder.
    - `simulator_profiles[]` — one entry per simulator family:
      - `name` — display label
      - `path_marker` — case-insensitive substring matched against the exe path
@@ -79,9 +81,9 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
 
 1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below; if the path doesn't resolve to a file, a red `(file not found)` hint joins it so the bad path is caught before Add. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable. The **Clear** button on the right empties the field and re-focuses it.
 2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
-3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch, Upload switch (defaults on when `upload.enabled` is set in config). These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
+3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, a **Cleanup** button, and an Upload switch (defaults on when `upload.enabled` is set in config). The Cleanup button cycles three local-retention policies applied after a case is zipped: **Keep** (keep the raw folder and the archive), **Folder** (delete the raw folder, keep the archive — the default), **Both** (delete the folder *and* the archive — the archive only after a successful upload, so an un-uploaded archive is never dropped). These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
 4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items. Adding **during** a batch is fine: the worker reads the queue live and picks up the new entries as soon as the current case finishes.
-5. **Queue table** — 13 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Upl / Status / Time / ETA / Warnings / Errors` (`Upl` = upload archive after zip). Simulator / Scene cells show just the filename minus its extension (`.exe` / `.json`), head+ellipsis+tail-truncated when they would otherwise overflow their column. The two columns absorb any terminal width beyond the baseline at a 1:2 ratio (rolling all surplus to whichever side is still truncated once the other fits its widest entry; falling back to 1:2 padding when both fit). A missing scene file is flagged with a ` [!]` marker on the row. Time / Warnings / Errors tick live (1 Hz) while a case is running, and the whole table re-stats files once a second so a simulator / scene file deleted between Add and run gets flagged promptly. ETA is filled in from `step_pattern + eta_pattern` if the profile has one. Each row's background reflects its status:
+5. **Queue table** — 13 columns: `# / Simulator / Scene / OMP / MPI / Zip / Clean / Upl / Status / Time / ETA / Warnings / Errors` (`Clean` = cleanup policy `keep`/`fldr`/`both`; `Upl` = upload archive after zip). Simulator / Scene cells show just the filename minus its extension (`.exe` / `.json`), head+ellipsis+tail-truncated when they would otherwise overflow their column. The two columns absorb any terminal width beyond the baseline at a 1:2 ratio (rolling all surplus to whichever side is still truncated once the other fits its widest entry; falling back to 1:2 padding when both fit). A missing scene file is flagged with a ` [!]` marker on the row. Time / Warnings / Errors tick live (1 Hz) while a case is running, and the whole table re-stats files once a second so a simulator / scene file deleted between Add and run gets flagged promptly. ETA is filled in from `step_pattern + eta_pattern` if the profile has one. Each row's background reflects its status:
 
    | Background | Status |
    |---|---|
@@ -127,7 +129,7 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 ## Usage — CLI
 
 ```powershell
-python batch_simu_cli.py [--no-zip] [--keep-output]
+python batch_simu_cli.py [--no-zip] [--keep-output] [--purge] [--no-upload]
 ```
 
 The script prompts for:
@@ -141,7 +143,8 @@ The script prompts for:
 | Flag | Default behavior | When set |
 |---|---|---|
 | `--no-zip` | Each case's output folder is compressed with 7-Zip | Skip compression |
-| `--keep-output` | Original output folder is deleted after successful compression | Keep the uncompressed folder |
+| `--keep-output` | Raw output folder is deleted after zipping, archive kept (cleanup `folder`) | Keep the raw folder too (cleanup `keep`) |
+| `--purge` | — | After a successful upload, delete the raw folder *and* the local archive (cleanup `both`); implies folder removal and overrides `--keep-output` |
 | `--no-upload` | Archive is uploaded via rclone when `upload.enabled` is `true` | Skip uploading (has no effect if upload is disabled in config) |
 
 The CLI applies one configuration to every case in the prompt batch. For per-case configuration, use the TUI.
@@ -151,8 +154,8 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 - Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
 - `stdout` is streamed live and parsed for the matched profile's `step_pattern`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
-- (TUI only) When `simulator.zip_async` is `true` (default), zip, upload, and remove run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / upload / remove block the queue (next case waits).
-- When `upload.enabled` is `true`, each successfully zipped archive is copied to the rclone remote (`rclone copy`, same serial worker as zip so uploads don't overlap). The upload runs before the raw folder is removed; the local archive is kept either way, so a failed upload can be retried manually without losing data.
+- (TUI only) When `simulator.zip_async` is `true` (default), zip, upload, and cleanup run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / upload / cleanup block the queue (next case waits).
+- Per case the pipeline is **zip → upload → cleanup**, in that order. When `upload.enabled` is `true`, each successfully zipped archive is copied to the rclone remote (`rclone copy`, same serial worker as zip so uploads don't overlap). Cleanup then applies the case's policy: `folder` deletes the raw output folder; `both` also deletes the local archive, **but only if the upload succeeded** — so a failed (or skipped) upload always leaves the archive on disk to retry. A failed zip cancels cleanup entirely.
 - Telegram digest at batch end summarises per-case time costs and totals.
 
 ## Requirements

@@ -4,7 +4,10 @@ import os
 import shlex
 import argparse
 
-from simulation import Simulator, load_config, profile_name, profile_supports_mpi
+from simulation import (
+    Simulator, load_config, profile_name, profile_supports_mpi,
+    CLEANUP_KEEP, CLEANUP_FOLDER, CLEANUP_BOTH,
+)
 
 
 def prompt_exe(simulator: Simulator) -> str:
@@ -88,7 +91,8 @@ def prompt_files() -> list:
 def main():
     parser = argparse.ArgumentParser(description="Run a batch simulation with optional output handling.")
     parser.add_argument("--no-zip", action="store_true", help="Do not zip the output files.")
-    parser.add_argument("--keep-output", action="store_true", help="Keep the original output files after processing.")
+    parser.add_argument("--keep-output", action="store_true", help="Keep the raw output folder after zipping (default: delete it, keep the archive).")
+    parser.add_argument("--purge", action="store_true", help="After a successful upload, delete both the output folder and the local archive. Implies folder removal; overrides --keep-output.")
     parser.add_argument("--no-upload", action="store_true", help="Do not upload the archive to the configured rclone remote.")
     args = parser.parse_args()
 
@@ -121,13 +125,18 @@ def main():
     scene_files = prompt_files()
 
     zip_output = not args.no_zip
-    remove_output = not args.keep_output
+    if args.purge:
+        cleanup = CLEANUP_BOTH
+    elif args.keep_output:
+        cleanup = CLEANUP_KEEP
+    else:
+        cleanup = CLEANUP_FOLDER
     upload_output = sim.upload_enabled and not args.no_upload
 
     sim.info("Start processing", tag="Batch")
     sim.tg.queue_message("#Batch Batch settings:")
     sim.tg.queue_message(f"Zip output: {'True' if zip_output else 'False'}")
-    sim.tg.queue_message(f"Remove output: {'True' if remove_output else 'False'}")
+    sim.tg.queue_message(f"Cleanup: {cleanup}")
     sim.tg.queue_message(f"Upload output: {'True' if upload_output else 'False'}")
     sim.tg.queue_message(f"MPI: {f'{mpi_ranks} ranks' if mpi_ranks > 0 else 'disabled'}")
     sim.tg.queue_message(f"OMP threads: {os.environ.get('OMP_NUM_THREADS', 'system default')}")
@@ -161,20 +170,19 @@ def main():
             if zip_output:
                 if not result.output_folder:
                     sim.info(
-                        f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
+                        f"No output directory detected in log for '{case_name}'; skipping zip/upload/cleanup.",
                         tag="Case",
                     )
                 else:
                     zipped = sim.zip_case_output(case_name, result.output_folder)
+                    archive = f"{result.output_folder}{sim.zip_ext}"
+                    uploaded = False
                     if zipped and upload_output:
-                        sim.upload_case_output(
-                            case_name, f"{result.output_folder}{sim.zip_ext}"
-                        )
-                    if remove_output:
-                        if zipped:
-                            sim.remove_case_output(case_name, result.output_folder)
-                        else:
-                            sim.info(f"Output removal cancelled for case '{case_name}'", tag="Case")
+                        uploaded = sim.upload_case_output(case_name, archive)
+                    sim.cleanup_case(
+                        case_name, result.output_folder, archive,
+                        cleanup, zipped, uploaded,
+                    )
         else:
             time_costs.append(-1)
             total_failures += 1

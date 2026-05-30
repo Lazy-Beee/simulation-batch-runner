@@ -66,6 +66,7 @@ QUEUE_COLS = [
     ("MPI", 5),
     ("Zip", 5),
     ("Rmv", 5),
+    ("Upl", 5),
     ("Status", 10),
     ("Time", 10),
     ("ETA", 10),
@@ -153,6 +154,7 @@ class SceneEntry:
     mpi_ranks: int               # 0 = MPI disabled
     zip_output: bool
     remove_output: bool
+    upload_output: bool
     status: str = STATUS_PENDING
     returncode: Optional[int] = None
     elapsed: Optional[int] = None
@@ -378,6 +380,8 @@ class BatchSimuApp(App):
                         yield Label("Zip")
                         yield Switch(value=True, id="remove_switch")
                         yield Label("Remove")
+                        yield Switch(value=self.simulator.upload_enabled, id="upload_switch")
+                        yield Label("Upload")
                         yield Button("Add", id="add_btn", variant="primary")
 
                     with Horizontal(classes="row"):
@@ -648,6 +652,7 @@ class BatchSimuApp(App):
                 self._fmt_mpi(e.mpi_ranks),
                 self._fmt_bool(e.zip_output),
                 self._fmt_bool(e.remove_output),
+                self._fmt_bool(e.upload_output),
                 status_display(e),
                 self._fmt_time(e.elapsed),
                 self._fmt_eta(e.eta),
@@ -838,6 +843,7 @@ class BatchSimuApp(App):
             mpi = 0
         zip_out = self.query_one("#zip_switch", Switch).value
         rm_out = self.query_one("#remove_switch", Switch).value
+        up_out = self.query_one("#upload_switch", Switch).value
 
         # All entries from one Add share a single exe snapshot. Snapshots only
         # diverge across separate Add calls, so a rebuild mid-batch only affects
@@ -861,6 +867,7 @@ class BatchSimuApp(App):
                 mpi_ranks=mpi,
                 zip_output=zip_out,
                 remove_output=rm_out,
+                upload_output=up_out,
                 batch_exe_path=shared_batch_exe,
             )
             self.scene_entries.append(entry)
@@ -1344,8 +1351,8 @@ class BatchSimuApp(App):
             try:
                 if task is None:
                     return
-                case_name, output_folder, do_zip, do_remove = task
-                self._run_zip_task(case_name, output_folder, do_zip, do_remove)
+                case_name, output_folder, do_zip, do_remove, do_upload = task
+                self._run_zip_task(case_name, output_folder, do_zip, do_remove, do_upload)
             except Exception as e:
                 try:
                     self.call_from_thread(
@@ -1357,13 +1364,13 @@ class BatchSimuApp(App):
                 self._zip_queue.task_done()
 
     def _run_zip_task(self, case_name: str, output_folder: Optional[str],
-                      do_zip: bool, do_remove: bool):
+                      do_zip: bool, do_remove: bool, do_upload: bool):
         sim = self.simulator
         if not do_zip:
             return
         if not output_folder:
             sim.info(
-                f"No output directory detected in log for '{case_name}'; skipping zip/remove.",
+                f"No output directory detected in log for '{case_name}'; skipping zip/remove/upload.",
                 tag="Case",
             )
             return
@@ -1372,6 +1379,12 @@ class BatchSimuApp(App):
             self.call_from_thread(self.log_line, line, kind)
 
         zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
+        # Upload the archive before removing the raw folder. The local
+        # archive itself is kept regardless of the upload outcome.
+        if zipped and do_upload:
+            sim.upload_case_output(
+                case_name, f"{output_folder}{sim.zip_ext}", on_line=zip_on_line,
+            )
         if do_remove:
             if zipped:
                 sim.remove_case_output(case_name, output_folder)
@@ -1523,12 +1536,12 @@ class BatchSimuApp(App):
                     if sim.zip_async:
                         self._zip_queue.put((
                             case_name, result.output_folder,
-                            entry.zip_output, entry.remove_output,
+                            entry.zip_output, entry.remove_output, entry.upload_output,
                         ))
                     else:
                         self._run_zip_task(
                             case_name, result.output_folder,
-                            entry.zip_output, entry.remove_output,
+                            entry.zip_output, entry.remove_output, entry.upload_output,
                         )
                     final_status = STATUS_DONE
                 else:

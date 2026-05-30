@@ -1,6 +1,6 @@
 # Batch Simulation
 
-Sequential batch runner for CLI simulators invoked as `<exe> --scene-file <path>`. Iterates through a queue of scene files, runs each one, and tracks per-case results. Supports OpenMP thread limiting, MPI launch (per simulator profile), output compression with 7-Zip, and Telegram progress notifications.
+Sequential batch runner for CLI simulators invoked as `<exe> --scene-file <path>`. Iterates through a queue of scene files, runs each one, and tracks per-case results. Supports OpenMP thread limiting, MPI launch (per simulator profile), output compression with 7-Zip, optional cloud upload of the archive via rclone, and Telegram progress notifications.
 
 Simulator-specific behavior (display name, MPI capability, step-line marker, default switch state) is fully data-driven via the `simulator_profiles` array in `config.json`. The matching profile is picked by case-insensitive substring match on the exe path. The template ships profiles for `SPlisHSPlasH` and `CAMMP`; add more for any other CLI simulator that follows the same `--scene-file` / `[ERROR]` / `[WARNING]` / `Output directory:` conventions.
 
@@ -22,7 +22,12 @@ Two frontends share the same core (`simulation.py`):
    - `simulator.zip_path` — path to `7z.exe`
    - `simulator.zip_ext` (optional) — archive file extension; 7z picks the format from this (`.7z` for LZMA2, `.zip` for Deflate). Defaults to `.zip`.
    - `simulator.zip_args` (optional) — extra switches passed to 7z between `a` and the archive name. Defaults to `["-mx=5", "-mmt=on"]` (7z's own defaults, made explicit). Common tweaks: `-mx=1` (fastest) / `-mx=9` (max compression), `-mmt=N` to cap thread count, `[]` to keep 7z's defaults silent.
-   - `simulator.zip_async` (optional, TUI only) — `true` (default) runs zip + remove on a background thread so the next case starts immediately. Set to `false` to make each case's zip block the queue until done.
+   - `simulator.zip_async` (optional, TUI only) — `true` (default) runs zip + remove (and upload) on a background thread so the next case starts immediately. Set to `false` to make each case's zip block the queue until done.
+   - `upload` (optional) — post-zip upload of each case archive to a cloud remote via [rclone](https://rclone.org/). Runs after a successful zip and before the raw folder is removed; the local archive is always kept regardless of upload outcome.
+     - `enabled` — `false` (default) disables uploading entirely. When `true`, the TUI's per-case **Upload** switch defaults on.
+     - `rclone_path` — path to the `rclone` executable (just `"rclone"` if it's on PATH).
+     - `remote` — rclone destination, e.g. `"gdrive:batch_output/"`. The archive is copied here keeping its file name (`rclone copy`); set up the remote once with `rclone config` (a one-time OAuth authorization for Google Drive).
+     - `args` (optional) — extra switches passed to rclone between `copy` and the source path, e.g. `["--bwlimit", "8M"]` to cap bandwidth or `["--stats-one-line", "-v", "--stats", "30s"]` for periodic progress lines in the log.
    - `defaults.omp_threads` / `defaults.mpi_ranks` — fallback values used when a switch is on but its numeric input is blank
    - `simulator_profiles[]` — one entry per simulator family:
      - `name` — display label
@@ -33,7 +38,7 @@ Two frontends share the same core (`simulation.py`):
      - `default_omp` / `default_mpi` (TUI only) — initial Switch state when this profile is matched; re-applied only when the matched profile *transitions*
    - `telegram.enabled` — set to `true` and fill `bot_token` / `chat_id` for notifications
 
-   The per-case output folder is auto-detected from the simulator's log (`Output directory:` line, quoted or unquoted). If the line isn't seen, zip and remove are skipped for that case.
+   The per-case output folder is auto-detected from the simulator's log (`Output directory:` line, quoted or unquoted). If the line isn't seen, zip, upload, and remove are skipped for that case.
 3. Install dependencies:
    ```powershell
    pip install -r requirements.txt
@@ -74,9 +79,9 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
 
 1. **Simulator** field — paste a path or drag a file in. The detected profile name appears below; if the path doesn't resolve to a file, a red `(file not found)` hint joins it so the bad path is caught before Add. If the profile forbids MPI (e.g. SPHSimulator), MPI controls auto-disable. The **Clear** button on the right empties the field and re-focuses it.
 2. **Scene** field — paste one or more scene paths (space-separated, quote paths with spaces) or drag files in. Press *Enter* or click **Add** to enqueue. **Clear** empties the field. Underneath, a `Drag target: ...` label shows which of the two inputs the next drag-drop / paste will land in (click either input to switch).
-3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch. These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
+3. **Settings row** — OMP switch + thread count, MPI switch + rank count, Zip switch, Remove switch, Upload switch (defaults on when `upload.enabled` is set in config). These act as the defaults for cases added next. Switches snap to the profile's `default_omp` / `default_mpi` only when the matched profile transitions, so a manual toggle survives further typing in the exe field.
 4. **Add** — snapshots the current widget state and appends one entry per scene path. Later toggles don't retroactively affect queued items. Adding **during** a batch is fine: the worker reads the queue live and picks up the new entries as soon as the current case finishes.
-5. **Queue table** — 12 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Status / Time / ETA / Warnings / Errors`. Simulator / Scene cells show just the filename minus its extension (`.exe` / `.json`), head+ellipsis+tail-truncated when they would otherwise overflow their column. The two columns absorb any terminal width beyond the baseline at a 1:2 ratio (rolling all surplus to whichever side is still truncated once the other fits its widest entry; falling back to 1:2 padding when both fit). A missing scene file is flagged with a ` [!]` marker on the row. Time / Warnings / Errors tick live (1 Hz) while a case is running, and the whole table re-stats files once a second so a simulator / scene file deleted between Add and run gets flagged promptly. ETA is filled in from `step_pattern + eta_pattern` if the profile has one. Each row's background reflects its status:
+5. **Queue table** — 13 columns: `# / Simulator / Scene / OMP / MPI / Zip / Rmv / Upl / Status / Time / ETA / Warnings / Errors` (`Upl` = upload archive after zip). Simulator / Scene cells show just the filename minus its extension (`.exe` / `.json`), head+ellipsis+tail-truncated when they would otherwise overflow their column. The two columns absorb any terminal width beyond the baseline at a 1:2 ratio (rolling all surplus to whichever side is still truncated once the other fits its widest entry; falling back to 1:2 padding when both fit). A missing scene file is flagged with a ` [!]` marker on the row. Time / Warnings / Errors tick live (1 Hz) while a case is running, and the whole table re-stats files once a second so a simulator / scene file deleted between Add and run gets flagged promptly. ETA is filled in from `step_pattern + eta_pattern` if the profile has one. Each row's background reflects its status:
 
    | Background | Status |
    |---|---|
@@ -137,6 +142,7 @@ The script prompts for:
 |---|---|---|
 | `--no-zip` | Each case's output folder is compressed with 7-Zip | Skip compression |
 | `--keep-output` | Original output folder is deleted after successful compression | Keep the uncompressed folder |
+| `--no-upload` | Archive is uploaded via rclone when `upload.enabled` is `true` | Skip uploading (has no effect if upload is disabled in config) |
 
 The CLI applies one configuration to every case in the prompt batch. For per-case configuration, use the TUI.
 
@@ -145,7 +151,8 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 - Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
 - `stdout` is streamed live and parsed for the matched profile's `step_pattern`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
-- (TUI only) When `simulator.zip_async` is `true` (default), zip and remove run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / remove block the queue (next case waits).
+- (TUI only) When `simulator.zip_async` is `true` (default), zip, upload, and remove run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / upload / remove block the queue (next case waits).
+- When `upload.enabled` is `true`, each successfully zipped archive is copied to the rclone remote (`rclone copy`, same serial worker as zip so uploads don't overlap). The upload runs before the raw folder is removed; the local archive is kept either way, so a failed upload can be retried manually without losing data.
 - Telegram digest at batch end summarises per-case time costs and totals.
 
 ## Requirements
@@ -155,6 +162,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 - `textual>=1.0` — TUI only; CLI works without it. We rely on newer API (`App.copy_to_clipboard`, `Strip.text`, `events.DescendantFocus`, `Static.text_selection`); 0.x versions are missing some of these.
 - `psutil` — TUI TopBar CPU/MEM stats (optional; the TUI runs fine without)
 - 7-Zip — only if you want output compression
+- [rclone](https://rclone.org/) — only if you enable `upload`; configure the remote once with `rclone config`
 - `mpiexec` on PATH — only if a profile sets `supports_mpi: true` and the user toggles MPI on
 
 ## Testing

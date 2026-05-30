@@ -89,6 +89,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run a batch simulation with optional output handling.")
     parser.add_argument("--no-zip", action="store_true", help="Do not zip the output files.")
     parser.add_argument("--keep-output", action="store_true", help="Keep the original output files after processing.")
+    parser.add_argument("--no-upload", action="store_true", help="Do not upload the archive to the configured rclone remote.")
     args = parser.parse_args()
 
     config = load_config()
@@ -121,11 +122,13 @@ def main():
 
     zip_output = not args.no_zip
     remove_output = not args.keep_output
+    upload_output = sim.upload_enabled and not args.no_upload
 
     sim.info("Start processing", tag="Batch")
     sim.tg.queue_message("#Batch Batch settings:")
     sim.tg.queue_message(f"Zip output: {'True' if zip_output else 'False'}")
     sim.tg.queue_message(f"Remove output: {'True' if remove_output else 'False'}")
+    sim.tg.queue_message(f"Upload output: {'True' if upload_output else 'False'}")
     sim.tg.queue_message(f"MPI: {f'{mpi_ranks} ranks' if mpi_ranks > 0 else 'disabled'}")
     sim.tg.queue_message(f"OMP threads: {os.environ.get('OMP_NUM_THREADS', 'system default')}")
     sim.tg.send_telegram_message_batch()
@@ -163,6 +166,10 @@ def main():
                     )
                 else:
                     zipped = sim.zip_case_output(case_name, result.output_folder)
+                    if zipped and upload_output:
+                        sim.upload_case_output(
+                            case_name, f"{result.output_folder}{sim.zip_ext}"
+                        )
                     if remove_output:
                         if zipped:
                             sim.remove_case_output(case_name, result.output_folder)

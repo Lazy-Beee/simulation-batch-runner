@@ -6,6 +6,12 @@
     "zip_args": ["-mx=5", "-mmt=on", "-m0=lzma2"],
     "zip_async": true
   },
+  "upload": {
+    "enabled": false,
+    "rclone_path": "rclone",
+    "remote": "gdrive:batch_output/",
+    "args": ["--stats-one-line", "-v", "--stats", "30s"]
+  },
   "simulator_profiles": [
     {
       "name": "simulator",

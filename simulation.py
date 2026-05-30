@@ -157,6 +157,16 @@ class Simulator:
         # batch worker to wait for each archive before moving on.
         self.zip_async = bool(sim.get("zip_async", True))
 
+        # Optional post-zip upload of the archive to a cloud remote via
+        # rclone. Runs after a successful zip and before remove; the local
+        # archive is always left in place (only the raw output folder is
+        # ever removed). On the TUI this rides the same async zip worker.
+        up = config.get("upload", {})
+        self.upload_enabled = bool(up.get("enabled", False))
+        self.rclone_path = up.get("rclone_path", "rclone")
+        self.upload_remote = up.get("remote", "")
+        self.upload_args: List[str] = list(up.get("args", []))
+
         defaults = config.get("defaults", {})
         self.default_omp_threads = defaults.get("omp_threads", 24)
         self.default_mpi_ranks = defaults.get("mpi_ranks", 4)
@@ -341,6 +351,59 @@ class Simulator:
             return True
         except subprocess.CalledProcessError as e:
             self.info(f"Error during compression output of case '{case_name}': {e}", tag="Case")
+            return False
+
+    def upload_case_output(
+        self,
+        case_name: str,
+        zip_file: str,
+        on_line: Optional[Callable[[str, str], None]] = None,
+    ) -> bool:
+        """Upload a case archive to the configured rclone remote.
+
+        Copies zip_file (the archive produced by zip_case_output) into
+        upload_remote via 'rclone copy', which preserves the file name and
+        skips the transfer if an identical copy already exists. The local
+        archive is never touched - only the raw output folder is removed.
+
+        on_line: same contract as zip_case_output - the TUI must pass one so
+            rclone's output streams through the log instead of inheriting
+            stdio (and its progress redraws don't corrupt the render).
+        """
+        if not self.upload_enabled:
+            return False
+        if not self.upload_remote:
+            self.info(f"Upload skipped for '{case_name}': no remote configured", tag="Case")
+            return False
+        if not os.path.isfile(zip_file):
+            self.info(f"Upload skipped for '{case_name}': archive '{zip_file}' not found", tag="Case")
+            return False
+        cmd = [self.rclone_path, "copy", *self.upload_args, zip_file, self.upload_remote]
+        try:
+            if on_line is None:
+                subprocess.run(cmd, check=True)
+            else:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                )
+                for line in proc.stdout:
+                    on_line(line, "raw")
+                proc.wait()
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode, cmd)
+            self.info(f"Uploaded archive of case '{case_name}' to {self.upload_remote}", tag="Case")
+            return True
+        except FileNotFoundError:
+            self.info(f"Upload failed for '{case_name}': rclone not found at '{self.rclone_path}'", tag="Case")
+            return False
+        except subprocess.CalledProcessError as e:
+            self.info(f"Error uploading archive of case '{case_name}': {e}", tag="Case")
             return False
 
     def remove_case_output(self, case_name: str, output_folder: str):

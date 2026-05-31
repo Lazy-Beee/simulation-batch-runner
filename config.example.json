@@ -8,6 +8,7 @@
   },
   "upload": {
     "enabled": false,
+    "async": true,
     "rclone_path": "rclone",
     "remote": "gdrive:batch_output/",
     "args": ["--stats-one-line", "-v", "--stats", "30s"]

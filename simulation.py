@@ -186,6 +186,10 @@ class Simulator:
         self.rclone_path = up.get("rclone_path", "rclone")
         self.upload_remote = up.get("remote", "")
         self.upload_args: List[str] = list(up.get("args", []))
+        # When True (default), the TUI uploads on its own background worker -
+        # separate from zip - so a transfer overlaps zipping the next case.
+        # False uploads inline (blocks the zip step until the transfer ends).
+        self.upload_async = bool(up.get("async", True))
 
         defaults = config.get("defaults", {})
         self.default_omp_threads = defaults.get("omp_threads", 24)
@@ -464,19 +468,11 @@ class Simulator:
         except Exception as e:
             self.info(f"Error while deleting archive of case '{case_name}': {e}", tag="Case")
 
-    def cleanup_case(self, case_name: str, output_folder: str, zip_file: str,
-                     cleanup: str, zipped: bool, uploaded: bool):
-        """Apply the local-artifact retention policy after zip / upload.
+    def cleanup_folder(self, case_name: str, output_folder: str, cleanup: str, zipped: bool):
+        """Remove the raw output folder per the cleanup policy (runs after zip).
 
-        cleanup is one of CLEANUP_KEEP / CLEANUP_FOLDER / CLEANUP_BOTH:
-          keep   - nothing is deleted.
-          folder - the raw output folder is removed.
-          both   - the folder is removed, plus the local archive - but the
-                   archive only when an upload actually succeeded, so we
-                   never delete the sole remaining copy.
-
-        A failed zip (zipped is False) cancels all deletion: the raw data is
-        left in place to retry.
+        Independent of upload: the folder is never the uploaded artifact. A
+        failed zip cancels removal so the raw data stays around to retry.
         """
         if cleanup not in (CLEANUP_FOLDER, CLEANUP_BOTH):
             return
@@ -484,11 +480,24 @@ class Simulator:
             self.info(f"Cleanup cancelled for case '{case_name}' (zip failed)", tag="Case")
             return
         self.remove_case_output(case_name, output_folder)
-        if cleanup == CLEANUP_BOTH:
-            if uploaded:
-                self.remove_case_archive(case_name, zip_file)
-            else:
-                self.info(f"Kept local archive of case '{case_name}' (no successful upload)", tag="Case")
+
+    def cleanup_archive(self, case_name: str, zip_file: str, cleanup: str,
+                        zipped: bool, uploaded: bool):
+        """Remove the local archive for 'both' - but only after a successful
+        upload, so the sole remaining copy is never dropped."""
+        if cleanup != CLEANUP_BOTH or not zipped:
+            return
+        if uploaded:
+            self.remove_case_archive(case_name, zip_file)
+        else:
+            self.info(f"Kept local archive of case '{case_name}' (no successful upload)", tag="Case")
+
+    def cleanup_case(self, case_name: str, output_folder: str, zip_file: str,
+                     cleanup: str, zipped: bool, uploaded: bool):
+        """Full local cleanup (folder + archive) for the synchronous path,
+        where the upload outcome is already known."""
+        self.cleanup_folder(case_name, output_folder, cleanup, zipped)
+        self.cleanup_archive(case_name, zip_file, cleanup, zipped, uploaded)
 
     def send_batch_report(self, case_names, time_costs, total_failures, total_errors, total_warnings):
         self.tg.queue_message("#Batch Process summary:")

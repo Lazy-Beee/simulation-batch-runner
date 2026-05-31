@@ -393,11 +393,15 @@ class BatchSimuApp(App):
         self._last_profile_name: str | None = None
         self._current_col_widths: Optional[list[int]] = None
 
-        # Background zip / remove queue. Each finished case enqueues a task
+        # Background zip / cleanup queue. Each finished case enqueues a task
         # (run by _zip_worker_loop) so the next case can start while the
         # previous one is being archived. Drained at batch end.
         self._zip_queue: queue.Queue = queue.Queue()
         self._zip_worker: Optional[threading.Thread] = None
+        # Separate upload queue so transfers (network) overlap zipping the next
+        # case (disk). Gated independently by upload.async. Drained after zips.
+        self._upload_queue: queue.Queue = queue.Queue()
+        self._upload_worker: Optional[threading.Thread] = None
 
         # Multi-select for the queue table. Stores id(entry) so stale row
         # indices after reorder / remove don't shadow current selections.
@@ -807,6 +811,10 @@ class BatchSimuApp(App):
             target=self._zip_worker_loop, daemon=True, name="zip-worker",
         )
         self._zip_worker.start()
+        self._upload_worker = threading.Thread(
+            target=self._upload_worker_loop, daemon=True, name="upload-worker",
+        )
+        self._upload_worker.start()
 
     def on_resize(self, event):
         # Deferred: on_resize fires before the DataTable's content_size
@@ -1452,8 +1460,8 @@ class BatchSimuApp(App):
 
     def _zip_worker_loop(self):
         # Tasks are (case_name, output_folder, do_zip, cleanup, do_upload).
-        # Worker serialises them so we don't thrash disk with parallel 7z
-        # runs (and so uploads don't overlap either).
+        # Serialised so parallel cases don't thrash disk with concurrent 7z
+        # runs. Uploads are handed off to the separate upload worker.
         while True:
             try:
                 task = self._zip_queue.get()
@@ -1474,6 +1482,29 @@ class BatchSimuApp(App):
             finally:
                 self._zip_queue.task_done()
 
+    def _upload_worker_loop(self):
+        # Serialises uploads (one rclone at a time) while running independently
+        # of the zip worker. Task is (case_name, archive, cleanup).
+        while True:
+            try:
+                task = self._upload_queue.get()
+            except Exception:
+                return
+            try:
+                if task is None:
+                    return
+                case_name, archive, cleanup = task
+                self._run_upload_task(case_name, archive, cleanup)
+            except Exception as e:
+                try:
+                    self.call_from_thread(
+                        self.log_line, f"Upload task crashed: {e}", "error",
+                    )
+                except Exception:
+                    pass
+            finally:
+                self._upload_queue.task_done()
+
     def _run_zip_task(self, case_name: str, output_folder: Optional[str],
                       do_zip: bool, cleanup: str, do_upload: bool):
         sim = self.simulator
@@ -1490,13 +1521,28 @@ class BatchSimuApp(App):
             self.call_from_thread(self.log_line, line, kind)
 
         zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
-        # Upload before cleanup so 'Both' can safely drop the local archive
-        # only once the upload has actually landed.
         archive = f"{output_folder}{sim.zip_ext}"
-        uploaded = False
-        if zipped and do_upload:
-            uploaded = sim.upload_case_output(case_name, archive, on_line=zip_on_line)
-        sim.cleanup_case(case_name, output_folder, archive, cleanup, zipped, uploaded)
+        # Folder removal doesn't depend on the upload - settle it now.
+        sim.cleanup_folder(case_name, output_folder, cleanup, zipped)
+        if not (zipped and do_upload):
+            # Nothing to upload; settle the archive policy ('both' keeps it).
+            sim.cleanup_archive(case_name, archive, cleanup, zipped, uploaded=False)
+            return
+        # Hand the upload to its own worker (async) or run it inline (sync);
+        # the archive's own cleanup happens once the transfer outcome is known.
+        if sim.upload_async:
+            self._upload_queue.put((case_name, archive, cleanup))
+        else:
+            self._run_upload_task(case_name, archive, cleanup)
+
+    def _run_upload_task(self, case_name: str, archive: str, cleanup: str):
+        sim = self.simulator
+
+        def on_line(line, kind):
+            self.call_from_thread(self.log_line, line, kind)
+
+        uploaded = sim.upload_case_output(case_name, archive, on_line=on_line)
+        sim.cleanup_archive(case_name, archive, cleanup, zipped=True, uploaded=uploaded)
 
     @work(thread=True, exclusive=True)
     def _run_batch_worker(self):
@@ -1549,12 +1595,14 @@ class BatchSimuApp(App):
                 t.join()
 
             self.call_from_thread(self.set_progress, 100)
-            # Drain in-flight zip / upload tasks before the Telegram summary so
-            # it lands after the archive log noise rather than in the middle.
-            pending = self._zip_queue.unfinished_tasks
+            # Drain in-flight tasks before the Telegram summary so it lands
+            # after the archive log noise. Zips first (they enqueue uploads),
+            # then uploads.
+            pending = self._zip_queue.unfinished_tasks + self._upload_queue.unfinished_tasks
             if pending:
                 self.call_from_thread(self.set_status, f"Finishing {pending} zip / upload task(s)...")
                 self._zip_queue.join()
+                self._upload_queue.join()
 
             with self._batch_lock:
                 results = list(self._batch_results)

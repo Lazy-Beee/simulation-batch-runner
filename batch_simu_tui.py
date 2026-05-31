@@ -241,6 +241,21 @@ class IntStepInput(Input):
         self.cursor_position = len(self.value)
 
 
+class StepButton(Static):
+    """A height-1 clickable arrow that steps a target IntStepInput by delta."""
+
+    def __init__(self, label: str, target_id: str, delta: int, **kwargs):
+        super().__init__(label, **kwargs)
+        self._target_id = target_id
+        self._delta = delta
+
+    def on_click(self, event) -> None:
+        event.stop()
+        target = self.app.query_one(f"#{self._target_id}", IntStepInput)
+        if not target.disabled:   # ignore clicks while the field is locked
+            target.action_step(self._delta)
+
+
 class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
@@ -268,6 +283,15 @@ class BatchSimuApp(App):
     /* OMP holds a 2-digit value (default 24); the baseline narrow width clips
        it once focused (cursor pushes it out of view), so give OMP one more cell. */
     #omp_input { width: 9; }
+    /* Vertical mini-stepper: arrows docked to the top/bottom edges of the
+       3-row field so they bracket the value symmetrically (a 2-row pair can't
+       sit dead-centre in 3 rows, so frame it instead). */
+    .stepper { width: 1; height: 3; }
+    .stepper > StepButton { width: 1fr; height: 1; content-align: center middle; color: $text-muted; }
+    .stepper > .step_up { dock: top; }
+    .stepper > .step_down { dock: bottom; }
+    .stepper > StepButton:hover { background: $accent; color: $background; }
+    .stepper:disabled > StepButton { color: $text-disabled; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
     /* Pad "Simulator:" / "Scene:" labels to the same width so the two
@@ -442,11 +466,14 @@ class BatchSimuApp(App):
                         yield Button("STOP", id="stop_btn", variant="error", disabled=True)
                         yield Button("FORCE STOP", id="force_stop_btn", variant="error", disabled=True)
                         yield Button("RESUME", id="resume_btn", variant="primary")
-                        yield Label("Parallel")
+                        yield Label("  Parallel")
                         yield IntStepInput(
                             value=str(self.simulator.default_parallel_cases),
                             id="parallel_input", classes="narrow", type="integer", min_value=1,
                         )
+                        with Vertical(classes="stepper", id="parallel_stepper"):
+                            yield StepButton("▲", "parallel_input", 1, classes="step_up")
+                            yield StepButton("▼", "parallel_input", -1, classes="step_down")
                         yield Static("", id="bottom_filler")
                         yield Button("Reset", id="reset_btn", variant="warning")
                     yield Static("Idle", id="status_label")
@@ -708,6 +735,7 @@ class BatchSimuApp(App):
         self.query_one("#reset_btn", Button).disabled = False
         # Parallel count is captured at launch; re-enable editing for the next run.
         self.query_one("#parallel_input", Input).disabled = False
+        self.query_one("#parallel_stepper").disabled = False
 
     def apply_sim_type(self, exe_path: str):
         profile = self.simulator.identify_profile(exe_path)
@@ -1410,6 +1438,7 @@ class BatchSimuApp(App):
         # Lock the parallel count for the duration of the run; it's read once
         # at launch, so editing it mid-batch would be misleading.
         self.query_one("#parallel_input", Input).disabled = True
+        self.query_one("#parallel_stepper").disabled = True
         self.set_progress(0)
 
         self._run_batch_worker()

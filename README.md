@@ -104,7 +104,7 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
    - **STOP** — graceful: running case(s) finish naturally, then the batch exits (no new cases dispatched). Remaining pending cases stay pending.
    - **FORCE STOP** — kills the process tree of every running case (`taskkill /F /T` on Windows). Those in-flight entries are marked `stopped` (removable).
    - **RESUME** — re-queues `stopped` entries as pending and runs all pending. Done / failed / missing / error rows stay as a record.
-   - **Parallel** — how many cases run at once (defaults from `defaults.parallel_cases`). `1` = sequential. With `>1`, that many cases run concurrently and the log interleaves their lines, each prefixed with `[case name]`; see the resource note under `defaults.parallel_cases`. The value is read at START / RESUME and locked (greyed out) for the duration of the run, so change it before launching, not mid-batch.
+   - **Parallel** — how many cases run at once (defaults from `defaults.parallel_cases`). `1` = sequential. With `>1`, that many cases run concurrently and the log interleaves their lines, each prefixed with `[case name]`; see the resource note under `defaults.parallel_cases`. Adjust with the `▲`/`▼` steppers, by typing, or with the `Up`/`Down` arrow keys when focused. The value is read at START / RESUME and locked (greyed out) for the duration of the run, so change it before launching, not mid-batch.
    - **Reset** (bottom-right) — wipes the queue, log, progress, per-Add exe snapshots, and closes any open case tabs. Disabled while a batch is running.
 
 ### Drag-and-drop

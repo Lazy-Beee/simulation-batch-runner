@@ -27,7 +27,8 @@
     "omp_threads": 24,
     "mpi_ranks": 4,
     "zip": true,
-    "cleanup": "folder"
+    "cleanup": "folder",
+    "parallel_cases": 1
   },
   "telegram": {
     "enabled": false,

@@ -48,6 +48,7 @@ STATUS_ERROR = "error"       # exception during run
 STATUS_STOPPED = "stopped"   # process was force-stopped mid-run
 
 REMOVABLE_STATUSES = {STATUS_PENDING, STATUS_STOPPED}
+FINISHED_STATUSES = {STATUS_DONE, STATUS_FAILED, STATUS_MISSING, STATUS_ERROR, STATUS_STOPPED}
 
 ROW_STYLE_BY_STATUS = {
     STATUS_PENDING: "",
@@ -171,6 +172,12 @@ class SceneEntry:
     # Per-case private copy of the source exe, taken at Add time. Each entry
     # owns its own copy so re-compiling mid-batch only affects later adds.
     batch_exe_path: Optional[str] = None
+    # Runtime-only (not part of the queued config). Per-entry so cases can run
+    # concurrently: proc_holder holds the live Popen for force-stop, run_start
+    # drives the live elapsed tick, force_stopped flags a user kill.
+    proc_holder: list = field(default_factory=list, repr=False)
+    run_start: Optional[float] = field(default=None, repr=False)
+    force_stopped: bool = field(default=False, repr=False)
 
 
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
@@ -316,14 +323,10 @@ class BatchSimuApp(App):
         self.simulator = Simulator(self.config)
         self.scene_entries: list[SceneEntry] = []
         self.add_cleanup = self.simulator.default_cleanup   # current Add-row Cleanup choice
-        self.process_holder: list = []
         self.stop_requested = False
-        self.force_stopped_current = False   # set by FORCE STOP; consumed by worker
-        self.current_entry: Optional[SceneEntry] = None
         self.batch_running = False
-        self.current_case_start: float | None = None
-        self.current_warnings = 0
-        self.current_errors = 0
+        # Step pattern of the running profile; cleared under parallel runs where
+        # cases may use different profiles. Drives the latest-step label only.
         self.current_step_re: Optional[re.Pattern] = None
         # Re-snap OMP/MPI defaults only when the matched profile actually
         # changes, so manual toggles survive further typing in the exe field.
@@ -403,6 +406,11 @@ class BatchSimuApp(App):
                         yield Button("STOP", id="stop_btn", variant="error", disabled=True)
                         yield Button("FORCE STOP", id="force_stop_btn", variant="error", disabled=True)
                         yield Button("RESUME", id="resume_btn", variant="primary")
+                        yield Label("Parallel")
+                        yield Input(
+                            value=str(self.simulator.default_parallel_cases),
+                            id="parallel_input", classes="narrow", type="integer",
+                        )
                         yield Static("", id="bottom_filler")
                         yield Button("Reset", id="reset_btn", variant="warning")
                     yield Static("Idle", id="status_label")
@@ -444,13 +452,7 @@ class BatchSimuApp(App):
     def log_line(self, line: str, kind: str = "raw"):
         widget = self.query_one("#log_panel", RichLog)
         self._write_log_line(widget, line, kind)
-        if kind == "error":
-            self.current_errors += 1
-            self._refresh_current_stats()
-        elif kind == "warning":
-            self.current_warnings += 1
-            self._refresh_current_stats()
-        elif kind == "step":
+        if kind == "step":
             self.query_one("#current_step_label", Static).update(
                 f"Step: {self._format_step_text(line)}"
             )
@@ -466,28 +468,21 @@ class BatchSimuApp(App):
         return line.rstrip()
 
     def _refresh_current_stats(self):
-        if self.current_case_start is not None:
-            elapsed = round(_time.time() - self.current_case_start)
+        if self.batch_running:
+            now = _time.time()
+            for e in self.scene_entries:
+                if e.status == STATUS_RUNNING and e.run_start is not None:
+                    e.elapsed = round(now - e.run_start)
+            running = sum(1 for e in self.scene_entries if e.status == STATUS_RUNNING)
+            done = sum(1 for e in self.scene_entries if e.status in FINISHED_STATUSES)
+            total = len(self.scene_entries) or 1
             self.query_one("#current_stats_label", Static).update(
-                f"Elapsed: {datetime.timedelta(seconds=elapsed)} | "
-                f"Warnings: {self.current_warnings} | Errors: {self.current_errors}"
+                f"Running: {running} | Done: {done}/{total} | "
+                f"Warnings: {sum(e.warnings for e in self.scene_entries)} | "
+                f"Errors: {sum(e.errors for e in self.scene_entries)}"
             )
-            entry = self.current_entry
-            if entry is not None and entry.status == STATUS_RUNNING:
-                entry.elapsed = elapsed
-                # Match by identity, not dataclass equality - two entries with
-                # identical fields would otherwise shadow each other.
-                idx = next(
-                    (j for j, e in enumerate(self.scene_entries) if e is entry),
-                    -1,
-                )
-                if idx >= 0:
-                    total = len(self.scene_entries)
-                    case_name = self.simulator.case_name_from_path(entry.scene_path)
-                    self.set_status(f"Case {idx+1}/{total}: {case_name}")
-                    self.query_one("#current_case_label", Static).update(
-                        f"Case: {case_name} ({idx+1}/{total})"
-                    )
+            self.set_status(f"Running {running} | Done {done}/{total}")
+            self.set_progress((done / total) * 100)
         # Repaint every tick so file-existence changes flip the `[!]` marker
         # even while idle.
         self.refresh_scene_queue()
@@ -675,6 +670,8 @@ class BatchSimuApp(App):
         self.query_one("#force_stop_btn", Button).disabled = True
         self.query_one("#resume_btn", Button).disabled = False
         self.query_one("#reset_btn", Button).disabled = False
+        # Parallel count is captured at launch; re-enable editing for the next run.
+        self.query_one("#parallel_input", Input).disabled = False
 
     def apply_sim_type(self, exe_path: str):
         profile = self.simulator.identify_profile(exe_path)
@@ -729,17 +726,6 @@ class BatchSimuApp(App):
             self.refresh()
         except Exception:
             pass
-
-    def start_current_case(self, case_name: str, idx: int, total: int):
-        self.current_case_start = _time.time()
-        self.current_warnings = 0
-        self.current_errors = 0
-        self.query_one("#current_case_label", Static).update(f"Case: {case_name} ({idx+1}/{total})")
-        self.query_one("#current_step_label", Static).update("Step: -")
-        self._refresh_current_stats()
-
-    def finish_current_case(self):
-        self.current_case_start = None
 
     def on_mount(self):
         # First paint runs before layout, so scrollable_content_region is 0
@@ -1145,15 +1131,10 @@ class BatchSimuApp(App):
         self.current_step_re = None
         self._last_profile_name = None
         self.stop_requested = False
-        self.force_stopped_current = False
-        self.current_entry = None
         self.apply_sim_type(self.simulator.default_exe)
-        self.current_warnings = 0
-        self.current_errors = 0
-        self.finish_current_case()
         self.query_one("#current_case_label", Static).update("No case running")
         self.query_one("#current_step_label", Static).update("Step: -")
-        self.query_one("#current_stats_label", Static).update("Elapsed: - | Warnings: 0 | Errors: 0")
+        self.query_one("#current_stats_label", Static).update("Idle | Warnings: 0 | Errors: 0")
         self.reset_run_controls()
         self.switch_tab("setup")
 
@@ -1264,6 +1245,10 @@ class BatchSimuApp(App):
         entry.elapsed = None
         entry.warnings = 0
         entry.errors = 0
+        entry.eta = None
+        entry.proc_holder = []
+        entry.run_start = None
+        entry.force_stopped = False
 
     @on(Button.Pressed, "#start_btn")
     def on_start(self):
@@ -1283,7 +1268,7 @@ class BatchSimuApp(App):
         if not self.batch_running:
             return
         self.stop_requested = True
-        self.log_line("--- Stop requested: current case will finish then batch exits ---", "warning")
+        self.log_line("--- Stop requested: running case(s) will finish then batch exits ---", "warning")
 
     def action_stop(self):
         self.on_stop()
@@ -1293,10 +1278,16 @@ class BatchSimuApp(App):
         if not self.batch_running:
             return
         self.stop_requested = True
-        self.force_stopped_current = True
-        for proc in self.process_holder:
-            kill_proc_tree(proc)
-        self.log_line("--- Force stop: terminating current case (process tree) ---", "warning")
+        # Kill every case currently running. Each runner flags its own entry
+        # so it reports STOPPED (not FAILED) once its process dies.
+        killed = 0
+        for entry in self.scene_entries:
+            if entry.status == STATUS_RUNNING:
+                entry.force_stopped = True
+                for proc in entry.proc_holder:
+                    kill_proc_tree(proc)
+                    killed += 1
+        self.log_line(f"--- Force stop: terminating {killed} running process tree(s) ---", "warning")
 
     @on(Button.Pressed, "#resume_btn")
     def on_resume(self):
@@ -1317,6 +1308,27 @@ class BatchSimuApp(App):
             self.log_line(msg, kind)
         else:
             self.call_from_thread(self.log_line, msg, kind)
+
+    def _warn_oversubscription(self, pending):
+        # Soft hint only: parallel cases helps only when each case leaves cores
+        # free. Flag uncapped OMP or an estimated thread count over the cores.
+        cores = os.cpu_count() or 0
+        k = self._parallel_k
+        uncapped = [e for e in pending if e.omp_threads is None and e.mpi_ranks == 0]
+        if uncapped:
+            self.log_line(
+                f"Parallel={k}: {len(uncapped)} case(s) have no OMP limit; "
+                "running them concurrently will oversubscribe the CPU.",
+                "warning",
+            )
+        elif cores:
+            peak = max(((e.omp_threads or 1) * (e.mpi_ranks or 1)) for e in pending)
+            if peak * k > cores:
+                self.log_line(
+                    f"Parallel={k}: up to ~{peak * k} threads vs {cores} cores; "
+                    "cases may oversubscribe the CPU and run slower.",
+                    "warning",
+                )
 
     def _launch_batch(self):
         if not self.scene_entries:
@@ -1342,8 +1354,13 @@ class BatchSimuApp(App):
 
         self.batch_running = True
         self.stop_requested = False
-        self.force_stopped_current = False
-        self.process_holder = []
+        # Concurrency: K cases at once (1 = sequential). Read live from the
+        # Parallel input so it can be tuned between runs.
+        self._parallel_k = max(1, self._read_int(self.query_one("#parallel_input", Input).value, 1))
+        self._batch_lock = threading.Lock()
+        self._batch_results: list[dict] = []
+        if self._parallel_k > 1:
+            self._warn_oversubscription(pending)
 
         # Switch tab BEFORE disabling the focused button; otherwise Textual
         # auto-moves focus to the next focusable widget on Setup, which
@@ -1354,6 +1371,9 @@ class BatchSimuApp(App):
         self.query_one("#stop_btn", Button).disabled = False
         self.query_one("#force_stop_btn", Button).disabled = False
         self.query_one("#reset_btn", Button).disabled = True
+        # Lock the parallel count for the duration of the run; it's read once
+        # at launch, so editing it mid-batch would be misleading.
+        self.query_one("#parallel_input", Input).disabled = True
         self.set_progress(0)
 
         self._run_batch_worker()
@@ -1415,13 +1435,14 @@ class BatchSimuApp(App):
 
     @work(thread=True, exclusive=True)
     def _run_batch_worker(self):
+        # Coordinator: dispatch up to K cases concurrently (K=1 -> sequential),
+        # each on its own runner thread, then wait for them all. The live
+        # cursor still re-reads len(scene_entries) so a mid-batch Add extends
+        # this run.
         sim = self.simulator
-        case_names: list[str] = []
-        time_costs: list[int] = []
-        total_warnings = 0
-        total_errors = 0
-        total_failures = 0
-        # Start-of-batch digest only; the run loop reads scene_entries live.
+        k = self._parallel_k
+        sem = threading.Semaphore(k)
+        runners: list[threading.Thread] = []
         runnable = sum(1 for e in self.scene_entries if e.status == STATUS_PENDING)
         total_initial = len(self.scene_entries)
 
@@ -1429,11 +1450,11 @@ class BatchSimuApp(App):
             sim.info("Start processing", tag="Batch")
             sim.tg.queue_message("#Batch Batch settings:")
             sim.tg.queue_message(f"Pending cases to run: {runnable} / {total_initial}")
+            sim.tg.queue_message(f"Parallel cases: {k}")
             sim.tg.queue_message(f"Distinct simulators: {len({e.exe_path for e in self.scene_entries if e.status == STATUS_PENDING})}")
             sim.tg.send_telegram_message_batch()
+            self.call_from_thread(self._begin_run_header, k)
 
-            # Live cursor: each iteration re-reads len(self.scene_entries) so
-            # entries Added mid-batch extend this run.
             i = 0
             while True:
                 if self.stop_requested:
@@ -1445,170 +1466,168 @@ class BatchSimuApp(App):
                 if entry.status != STATUS_PENDING:
                     i += 1
                     continue
-                total = len(self.scene_entries)
-
-                case_name = sim.case_name_from_path(entry.scene_path)
-                case_names.append(case_name)
-                self.current_entry = entry
-                self.call_from_thread(self.set_status, f"Case {i+1}/{total}: {case_name}")
-                self.call_from_thread(self.set_progress, (i / total) * 100)
-                self.call_from_thread(self.start_current_case, case_name, i, total)
-                self.call_from_thread(self._mark_status, entry, STATUS_RUNNING)
-
-                if not os.path.exists(entry.scene_path):
-                    entry.elapsed = -1
-                    total_failures += 1
-                    sim.info(f"File '{entry.scene_path}' not found.", tag="Case")
-                    self.call_from_thread(self._mark_status, entry, STATUS_MISSING)
-                    time_costs.append(-1)
-                    self.current_entry = None
-                    i += 1
-                    continue
-
-                # Per-case OMP env (None unsets)
-                sim.set_omp_env(entry.omp_threads)
-
-                # Each entry owns a private copy prepared at Add time. If
-                # the copy was somehow deleted (e.g. user wiped the folder
-                # between adds and runs), skip the case rather than fall
-                # back to the source exe.
-                batch_exe = entry.batch_exe_path
-                if not batch_exe or not os.path.isfile(batch_exe):
-                    self.call_from_thread(
-                        self.log_line,
-                        f"Prepared exe missing for '{case_name}': {batch_exe}",
-                        "error",
-                    )
-                    entry.elapsed = -1
-                    total_failures += 1
-                    self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
-                    time_costs.append(-1)
-                    self.current_entry = None
-                    i += 1
-                    continue
-
-                profile = sim.identify_profile(entry.exe_path)
-                step_pattern_str = profile_step_pattern(profile)
-                self.current_step_re = re.compile(step_pattern_str) if step_pattern_str else None
-                eta_pat_str = profile_eta_pattern(profile)
-                eta_re = re.compile(eta_pat_str) if eta_pat_str else None
-
-                self.process_holder.clear()
-
-                entry.log_buffer = []
-                entry.eta = None
-
-                def on_line(line, kind, _entry=entry, _eta_re=eta_re):
-                    _entry.log_buffer.append((line, kind))
-                    if kind == "warning":
-                        _entry.warnings += 1
-                        self.call_from_thread(self.refresh_scene_queue)
-                    elif kind == "error":
-                        _entry.errors += 1
-                        self.call_from_thread(self.refresh_scene_queue)
-                    self.call_from_thread(self.log_line, line, kind)
-                    if kind == "step" and _eta_re is not None:
-                        m = _eta_re.search(line)
-                        if m:
-                            new_eta = m.group(1)
-                            if new_eta != _entry.eta:
-                                _entry.eta = new_eta
-                                self.call_from_thread(self.refresh_scene_queue)
-
-                try:
-                    # Live total so mid-case Adds bump the per-step denominator.
-                    result = sim.run_case(
-                        batch_exe, entry.scene_path, i,
-                        lambda: len(self.scene_entries),
-                        entry.mpi_ranks,
-                        on_line=on_line, process_holder=self.process_holder,
-                    )
-                except Exception as e:
-                    self.call_from_thread(self.log_line, f"Exception in case: {e}", "error")
-                    entry.elapsed = -1
-                    total_failures += 1
-                    self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
-                    time_costs.append(-1)
-                    self.current_entry = None
-                    i += 1
-                    continue
-
-                entry.returncode = result.returncode
-                entry.warnings = result.warnings
-                entry.errors = result.errors
-                total_warnings += result.warnings
-                total_errors += result.errors
-
-                if self.force_stopped_current:
-                    # Force-stop -> STOPPED (removable), not FAILED.
-                    self.force_stopped_current = False
-                    entry.elapsed = -1
-                    time_costs.append(-1)
-                    self.call_from_thread(self.finish_current_case)
-                    self.call_from_thread(self._mark_status, entry, STATUS_STOPPED)
-                    self.current_entry = None
-                    i += 1
-                    continue
-
-                if result.returncode == 0:
-                    entry.elapsed = result.elapsed
-                    time_costs.append(result.elapsed)
-                    # Async: enqueue and move on; the zip-worker drains.
-                    # Sync: run inline so the next case waits for the archive.
-                    if sim.zip_async:
-                        self._zip_queue.put((
-                            case_name, result.output_folder,
-                            entry.zip_output, entry.cleanup, entry.upload_output,
-                        ))
-                    else:
-                        self._run_zip_task(
-                            case_name, result.output_folder,
-                            entry.zip_output, entry.cleanup, entry.upload_output,
-                        )
-                    final_status = STATUS_DONE
-                else:
-                    entry.elapsed = -1
-                    total_failures += 1
-                    time_costs.append(-1)
-                    final_status = STATUS_FAILED
-
-                self.call_from_thread(self.finish_current_case)
-                self.call_from_thread(self._mark_status, entry, final_status)
-                self.call_from_thread(
-                    self.set_status,
-                    f"Done {i+1}/{len(self.scene_entries)} | "
-                    f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
+                # Blocks until a slot frees, so at most K cases run at once.
+                sem.acquire()
+                if self.stop_requested:
+                    sem.release()
+                    self.call_from_thread(self.log_line, "--- Batch stopped by user ---", "warning")
+                    break
+                t = threading.Thread(
+                    target=self._run_one_case, args=(entry, i, sem), daemon=True
                 )
-                self.current_entry = None
+                t.start()
+                runners.append(t)
                 i += 1
 
+            # Stop dispatching; wait for everything in flight to finish.
+            for t in runners:
+                t.join()
+
             self.call_from_thread(self.set_progress, 100)
-            # Drain any in-flight zip / remove tasks before reporting totals
-            # so the Telegram batch summary lands after the archive log
-            # noise rather than in the middle of it.
+            # Drain in-flight zip / upload tasks before the Telegram summary so
+            # it lands after the archive log noise rather than in the middle.
             pending = self._zip_queue.unfinished_tasks
             if pending:
-                self.call_from_thread(
-                    self.set_status,
-                    f"Finishing {pending} zip / remove task(s)...",
-                )
+                self.call_from_thread(self.set_status, f"Finishing {pending} zip / upload task(s)...")
                 self._zip_queue.join()
+
+            with self._batch_lock:
+                results = list(self._batch_results)
+            case_names = [r["name"] for r in results]
+            time_costs = [r["cost"] for r in results]
+            total_failures = sum(1 for r in results if r["failed"])
+            total_warnings = sum(r["warnings"] for r in results)
+            total_errors = sum(r["errors"] for r in results)
             sim.send_batch_report(case_names, time_costs, total_failures, total_errors, total_warnings)
             sim.info("All done", tag="Batch")
 
         finally:
             # batch_exe copies persist so START / RESUME can re-run with the
             # original snapshot; cleanup happens on Remove / Reset / unmount.
+            with self._batch_lock:
+                tw = sum(r["warnings"] for r in self._batch_results)
+                te = sum(r["errors"] for r in self._batch_results)
+                tf = sum(1 for r in self._batch_results if r["failed"])
             self.batch_running = False
-            self.current_entry = None
             self.call_from_thread(self.reset_run_controls)
-            self.call_from_thread(self.finish_current_case)
             self.call_from_thread(self.switch_tab, "setup")
             self.call_from_thread(
                 self.set_status,
-                f"Idle | "
-                f"Warnings: {total_warnings} | Errors: {total_errors} | Failures: {total_failures}",
+                f"Idle | Warnings: {tw} | Errors: {te} | Failures: {tf}",
             )
+
+    def _begin_run_header(self, k: int):
+        # Single Running-tab header for the whole batch; per-case detail lives
+        # in the queue table. current_step_re is cleared because concurrent
+        # cases may use different profiles - show step lines verbatim.
+        self.current_step_re = None
+        self.query_one("#current_case_label", Static).update(
+            "Running" if k == 1 else f"Running (up to {k} parallel)"
+        )
+        self.query_one("#current_step_label", Static).update("Step: -")
+
+    def _run_one_case(self, entry: SceneEntry, idx: int, sem: "threading.Semaphore"):
+        # One case on its own thread. It mutates only its own entry's fields;
+        # every widget update marshals onto the app via call_from_thread.
+        sim = self.simulator
+        case_name = sim.case_name_from_path(entry.scene_path)
+        rec = {"name": case_name, "cost": -1, "warnings": 0, "errors": 0, "failed": False}
+        try:
+            entry.run_start = _time.time()
+            entry.force_stopped = False
+            entry.proc_holder = []
+            entry.log_buffer = []
+            entry.eta = None
+            self.call_from_thread(self._mark_status, entry, STATUS_RUNNING)
+
+            if not os.path.exists(entry.scene_path):
+                sim.info(f"File '{entry.scene_path}' not found.", tag="Case")
+                self.call_from_thread(self._mark_status, entry, STATUS_MISSING)
+                rec["failed"] = True
+                return
+
+            batch_exe = entry.batch_exe_path
+            if not batch_exe or not os.path.isfile(batch_exe):
+                self.call_from_thread(
+                    self.log_line, f"Prepared exe missing for '{case_name}': {batch_exe}", "error",
+                )
+                self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
+                rec["failed"] = True
+                return
+
+            profile = sim.identify_profile(entry.exe_path)
+            eta_pat_str = profile_eta_pattern(profile)
+            eta_re = re.compile(eta_pat_str) if eta_pat_str else None
+            env = sim.make_env(entry.omp_threads)
+
+            def on_line(line, kind, _entry=entry, _eta_re=eta_re, _name=case_name):
+                _entry.log_buffer.append((line, kind))
+                if kind == "warning":
+                    _entry.warnings += 1
+                    self.call_from_thread(self.refresh_scene_queue)
+                elif kind == "error":
+                    _entry.errors += 1
+                    self.call_from_thread(self.refresh_scene_queue)
+                # Prefix the combined log so interleaved case streams stay legible.
+                self.call_from_thread(
+                    self.log_line, f"[{_name}] {line}" if line.strip() else line, kind,
+                )
+                if kind == "step" and _eta_re is not None:
+                    m = _eta_re.search(line)
+                    if m and m.group(1) != _entry.eta:
+                        _entry.eta = m.group(1)
+                        self.call_from_thread(self.refresh_scene_queue)
+
+            try:
+                result = sim.run_case(
+                    batch_exe, entry.scene_path, idx,
+                    lambda: len(self.scene_entries),
+                    entry.mpi_ranks,
+                    on_line=on_line, process_holder=entry.proc_holder, env=env,
+                )
+            except Exception as e:
+                self.call_from_thread(self.log_line, f"Exception in case '{case_name}': {e}", "error")
+                self.call_from_thread(self._mark_status, entry, STATUS_ERROR)
+                rec["failed"] = True
+                return
+
+            entry.returncode = result.returncode
+            entry.warnings = result.warnings
+            entry.errors = result.errors
+            rec["warnings"] = result.warnings
+            rec["errors"] = result.errors
+
+            if entry.force_stopped:
+                # Force-stop -> STOPPED (removable), not FAILED.
+                entry.elapsed = -1
+                self.call_from_thread(self._mark_status, entry, STATUS_STOPPED)
+                return
+
+            if result.returncode == 0:
+                entry.elapsed = result.elapsed
+                rec["cost"] = result.elapsed
+                # Async: enqueue and return; the zip-worker drains serially.
+                # Sync: run inline so this runner waits for the archive.
+                if sim.zip_async:
+                    self._zip_queue.put((
+                        case_name, result.output_folder,
+                        entry.zip_output, entry.cleanup, entry.upload_output,
+                    ))
+                else:
+                    self._run_zip_task(
+                        case_name, result.output_folder,
+                        entry.zip_output, entry.cleanup, entry.upload_output,
+                    )
+                self.call_from_thread(self._mark_status, entry, STATUS_DONE)
+            else:
+                entry.elapsed = -1
+                rec["failed"] = True
+                self.call_from_thread(self._mark_status, entry, STATUS_FAILED)
+        finally:
+            entry.run_start = None
+            with self._batch_lock:
+                self._batch_results.append(rec)
+            sem.release()
 
     def on_unmount(self):
         for entry in self.scene_entries:

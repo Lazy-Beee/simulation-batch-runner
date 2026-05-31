@@ -7,6 +7,7 @@ import json
 import time
 import shutil
 import datetime
+import threading
 import subprocess
 from pathlib import Path
 from typing import NamedTuple, Callable, Optional, List
@@ -112,7 +113,17 @@ class TelegramNotice:
         self.enabled = tg_config.get("enabled", False)
         self.bot_token = tg_config.get("bot_token", "")
         self.chat_id = tg_config.get("chat_id", "")
-        self.message_batch = []
+        # Thread-local so parallel case runners each accumulate their own
+        # per-case summary instead of interleaving into one shared batch.
+        self._local = threading.local()
+
+    @property
+    def message_batch(self):
+        batch = getattr(self._local, "batch", None)
+        if batch is None:
+            batch = []
+            self._local.batch = batch
+        return batch
 
     def request_message(self, message):
         if not self.enabled or not self.bot_token or not self.chat_id:
@@ -183,6 +194,8 @@ class Simulator:
         self.default_zip = bool(defaults.get("zip", True))
         cleanup = str(defaults.get("cleanup", CLEANUP_FOLDER)).lower()
         self.default_cleanup = cleanup if cleanup in (CLEANUP_KEEP, CLEANUP_FOLDER, CLEANUP_BOTH) else CLEANUP_FOLDER
+        # Max cases the TUI runs concurrently. 1 = sequential (original behavior).
+        self.default_parallel_cases = max(1, int(defaults.get("parallel_cases", 1)))
 
         self.profiles: List[dict] = list(config.get("simulator_profiles", []))
 
@@ -224,6 +237,20 @@ class Simulator:
         else:
             os.environ["OMP_NUM_THREADS"] = str(threads)
 
+    def make_env(self, omp_threads: Optional[int]) -> dict:
+        """A per-case copy of the environment with OMP_NUM_THREADS applied.
+
+        Passed to Popen via env= so concurrent cases don't race on the
+        process-global os.environ (the reason set_omp_env can't be used when
+        running cases in parallel).
+        """
+        env = os.environ.copy()
+        if omp_threads is None:
+            env.pop("OMP_NUM_THREADS", None)
+        else:
+            env["OMP_NUM_THREADS"] = str(omp_threads)
+        return env
+
     def build_cmd(self, exe_path: str, file_path: str, mpi_ranks: int = 0):
         if mpi_ranks > 0:
             return ["mpiexec", "-n", str(mpi_ranks), exe_path, "--scene-file", file_path]
@@ -238,6 +265,7 @@ class Simulator:
         mpi_ranks: int = 0,
         on_line: Optional[Callable[[str, str], None]] = None,
         process_holder: Optional[List] = None,
+        env: Optional[dict] = None,
     ) -> CaseResult:
         """Run a single case.
 
@@ -273,6 +301,7 @@ class Simulator:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
+            env=env,
         )
         if process_holder is not None:
             process_holder.append(process)

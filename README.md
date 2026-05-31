@@ -31,6 +31,7 @@ Two frontends share the same core (`simulation.py`):
    - `defaults.omp_threads` / `defaults.mpi_ranks` — fallback values used when a switch is on but its numeric input is blank
    - `defaults.zip` (optional, TUI Add-row default) — initial state of the Zip switch. Defaults to `true`.
    - `defaults.cleanup` (optional, TUI Add-row default) — initial Cleanup policy: `"keep"`, `"folder"` (default), or `"both"`. With `upload.enabled: true` this gives the out-of-the-box default of upload + keep archive + delete raw folder.
+   - `defaults.parallel_cases` (optional, TUI only) — how many cases run concurrently. `1` (default) = sequential, original behavior. Higher only helps when each case leaves CPU cores free (small cases, or OMP threads capped well below the core count); concurrent cases that each saturate the CPU will oversubscribe and run slower. The TUI's `Parallel` input seeds from this and can be changed per run.
    - `simulator_profiles[]` — one entry per simulator family:
      - `name` — display label
      - `path_marker` — case-insensitive substring matched against the exe path
@@ -100,9 +101,10 @@ Additionally, **per-case log tabs** can be popped open from the Queue table (see
 7. **Multi-select** — `Space` toggles a checkmark (`*`) in the `#` column for the cursor row. While anything is multi-selected, the row actions switch to bulk mode: **Remove selected** drops every removable entry in the selection, **Up / Down** moves the whole group as a unit (rows that hit a boundary or a non-pending neighbour stay put while the rest still shift), and **View log** opens one tab per finished entry (pending / running members are silently skipped). `Ctrl+A` selects every row, `Esc` clears the selection.
 8. **Run controls** — bottom row:
    - **START** — resets every non-pending entry back to pending (clearing previous `Time` / `Warnings` / `Errors`) and runs the whole queue.
-   - **STOP** — graceful: the current case finishes naturally, then the batch exits. Remaining pending cases stay pending.
-   - **FORCE STOP** — kills the current process tree (`taskkill /F /T` on Windows). The in-flight entry is marked `stopped` (removable).
+   - **STOP** — graceful: running case(s) finish naturally, then the batch exits (no new cases dispatched). Remaining pending cases stay pending.
+   - **FORCE STOP** — kills the process tree of every running case (`taskkill /F /T` on Windows). Those in-flight entries are marked `stopped` (removable).
    - **RESUME** — re-queues `stopped` entries as pending and runs all pending. Done / failed / missing / error rows stay as a record.
+   - **Parallel** — how many cases run at once (defaults from `defaults.parallel_cases`). `1` = sequential. With `>1`, that many cases run concurrently and the log interleaves their lines, each prefixed with `[case name]`; see the resource note under `defaults.parallel_cases`. The value is read at START / RESUME and locked (greyed out) for the duration of the run, so change it before launching, not mid-batch.
    - **Reset** (bottom-right) — wipes the queue, log, progress, per-Add exe snapshots, and closes any open case tabs. Disabled while a batch is running.
 
 ### Drag-and-drop
@@ -154,6 +156,7 @@ The CLI applies one configuration to every case in the prompt batch. For per-cas
 - Each `Add` snapshots the simulator exe into `<base>.batch<ext>` (or `<base>.batch.1<ext>`, `.batch.2<ext>`, ... if the name's taken). All scenes from the same Add share one copy; a later Add gets a fresh snapshot. The bound entries keep using their snapshot for the whole batch life cycle, so you can rebuild the source exe mid-batch and queue more cases against the new version. Copies are reference-counted and cleaned up on Remove / Reset / app exit.
 - `stdout` is streamed live and parsed for the matched profile's `step_pattern`, plus `[ERROR]` / `[WARNING]` / `Output directory:`. Each line fires the appropriate event exactly once (no duplicate dispatch).
 - A failed case (non-zero exit code or missing scene file) is reported and the batch continues with the next file unless the user pressed STOP.
+- (TUI only) Cases run on a coordinator that dispatches up to `Parallel` of them at once, each on its own thread (`Parallel: 1` = the original sequential loop). Each gets its own `OMP_NUM_THREADS` via the child process environment (not the shared `os.environ`), so concurrent cases don't race on it. The queue table shows every running case live; the Running tab's log interleaves their output with `[case name]` prefixes. Mid-batch Add still extends the run.
 - (TUI only) When `simulator.zip_async` is `true` (default), zip, upload, and cleanup run on a background thread so the next case starts as soon as the previous one's simulator exits. Tasks are serialised behind a single worker so multiple 7z runs don't thrash disk; the batch waits for any pending tasks before declaring idle. Set `zip_async: false` to make zip / upload / cleanup block the queue (next case waits).
 - Per case the pipeline is **zip → upload → cleanup**, in that order. When `upload.enabled` is `true`, each successfully zipped archive is copied to the rclone remote (`rclone copy`, same serial worker as zip so uploads don't overlap). Cleanup then applies the case's policy: `folder` deletes the raw output folder; `both` also deletes the local archive, **but only if the upload succeeded** — so a failed (or skipped) upload always leaves the archive on disk to retry. A failed zip cancels cleanup entirely.
 - Telegram digest at batch end summarises per-case time costs and totals.

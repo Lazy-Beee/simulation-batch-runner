@@ -1308,6 +1308,16 @@ class BatchSimuApp(App):
         self.refresh_scene_queue()
         self._launch_batch()
 
+    def _console_sink(self, msg, kind="info"):
+        # simulator.info() reaches here from two thread contexts: the batch
+        # worker thread (must marshal onto the app via call_from_thread) and,
+        # for mid-batch Add, directly from a UI event handler already on the
+        # app thread (where call_from_thread raises). Route per caller thread.
+        if threading.get_ident() == self._thread_id:
+            self.log_line(msg, kind)
+        else:
+            self.call_from_thread(self.log_line, msg, kind)
+
     def _launch_batch(self):
         if not self.scene_entries:
             self.log_line("No scene entries in the queue.", "error")
@@ -1328,7 +1338,7 @@ class BatchSimuApp(App):
                 )
             return
 
-        self.simulator.write_console = lambda msg, kind="info": self.call_from_thread(self.log_line, msg, kind)
+        self.simulator.write_console = self._console_sink
 
         self.batch_running = True
         self.stop_requested = False

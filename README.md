@@ -127,6 +127,7 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | `F1` / `F2` | Jump to Queue / Running |
 | `Space` | Toggle multi-select on the cursor row |
 | `Ctrl+A` / `Esc` | Select all / clear selection (hidden from Footer) |
+| `Up` / `Down` | Step the focused numeric field (OMP / MPI / Parallel) by ±1, clamped at its minimum |
 
 ## Usage — CLI
 

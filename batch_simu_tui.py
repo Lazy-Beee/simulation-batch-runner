@@ -208,6 +208,39 @@ def strip_quotes(s: str) -> str:
     return s
 
 
+class IntStepInput(Input):
+    """Integer Input that also steps by 1 with the Up / Down arrow keys.
+
+    A blank field steps to min_value on the first press; values are clamped to
+    [min_value, max_value] when those are set.
+    """
+    BINDINGS = [
+        Binding("up", "step(1)", "Increment", show=False),
+        Binding("down", "step(-1)", "Decrement", show=False),
+    ]
+
+    def __init__(self, *args, min_value: Optional[int] = None,
+                 max_value: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._min = min_value
+        self._max = max_value
+
+    def action_step(self, delta: int) -> None:
+        raw = self.value.strip()
+        base = self._min if self._min is not None else 0
+        if raw:
+            try:
+                base = int(raw) + delta
+            except ValueError:
+                pass
+        if self._min is not None:
+            base = max(self._min, base)
+        if self._max is not None:
+            base = min(self._max, base)
+        self.value = str(base)
+        self.cursor_position = len(self.value)
+
+
 class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
@@ -232,6 +265,9 @@ class BatchSimuApp(App):
     #setup_panel > #status_label { margin-top: 1; }
     Input { width: 1fr; }
     .narrow { width: 8; }
+    /* OMP holds a 2-digit value (default 24); the baseline narrow width clips
+       it once focused (cursor pushes it out of view), so give OMP one more cell. */
+    #omp_input { width: 9; }
     Button { margin-right: 1; }
     Label { margin: 0 1; }
     /* Pad "Simulator:" / "Scene:" labels to the same width so the two
@@ -376,15 +412,15 @@ class BatchSimuApp(App):
                     with Horizontal(classes="row"):
                         yield Switch(value=False, id="omp_switch")
                         yield Label("OMP")
-                        yield Input(
+                        yield IntStepInput(
                             value=str(self.simulator.default_omp_threads),
-                            id="omp_input", classes="narrow", type="integer",
+                            id="omp_input", classes="narrow", type="integer", min_value=1,
                         )
                         yield Switch(value=False, id="mpi_switch")
                         yield Label("MPI")
-                        yield Input(
+                        yield IntStepInput(
                             value=str(self.simulator.default_mpi_ranks),
-                            id="mpi_input", classes="narrow", type="integer",
+                            id="mpi_input", classes="narrow", type="integer", min_value=1,
                         )
                         yield Switch(value=self.simulator.default_zip, id="zip_switch")
                         yield Label("Zip")
@@ -407,9 +443,9 @@ class BatchSimuApp(App):
                         yield Button("FORCE STOP", id="force_stop_btn", variant="error", disabled=True)
                         yield Button("RESUME", id="resume_btn", variant="primary")
                         yield Label("Parallel")
-                        yield Input(
+                        yield IntStepInput(
                             value=str(self.simulator.default_parallel_cases),
-                            id="parallel_input", classes="narrow", type="integer",
+                            id="parallel_input", classes="narrow", type="integer", min_value=1,
                         )
                         yield Static("", id="bottom_filler")
                         yield Button("Reset", id="reset_btn", variant="warning")

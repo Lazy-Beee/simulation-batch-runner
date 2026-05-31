@@ -178,6 +178,8 @@ class SceneEntry:
     proc_holder: list = field(default_factory=list, repr=False)
     run_start: Optional[float] = field(default=None, repr=False)
     force_stopped: bool = field(default=False, repr=False)
+    zip_done: bool = field(default=False, repr=False)
+    upload_done: bool = field(default=False, repr=False)
 
 
 def format_sim_type_text(simulator: Simulator, exe_path: str) -> str:
@@ -586,6 +588,13 @@ class BatchSimuApp(App):
         return "Y" if flag else "-"
 
     @staticmethod
+    def _fmt_stage(enabled: bool, done: bool) -> str:
+        # '-' disabled, 'Y' enabled/pending, 'D' completed for this case
+        if not enabled:
+            return "-"
+        return "D" if done else "Y"
+
+    @staticmethod
     def _fmt_time(elapsed: Optional[int]) -> str:
         # H:MM:SS left-flush; column ljust pads the trailing space. Sidesteps
         # timedelta's "X days, ..." rollover so anything < 1000h fits the cell.
@@ -718,9 +727,9 @@ class BatchSimuApp(App):
                 scene_disp,
                 self._fmt_omp(e.omp_threads),
                 self._fmt_mpi(e.mpi_ranks),
-                self._fmt_bool(e.zip_output),
+                self._fmt_stage(e.zip_output, e.zip_done),
                 CLEANUP_COL.get(e.cleanup, e.cleanup),
-                self._fmt_bool(e.upload_output),
+                self._fmt_stage(e.upload_output, e.upload_done),
                 status_display(e),
                 self._fmt_time(e.elapsed),
                 self._fmt_eta(e.eta),
@@ -1321,6 +1330,8 @@ class BatchSimuApp(App):
         entry.proc_holder = []
         entry.run_start = None
         entry.force_stopped = False
+        entry.zip_done = False
+        entry.upload_done = False
 
     @on(Button.Pressed, "#start_btn")
     def on_start(self):
@@ -1470,8 +1481,8 @@ class BatchSimuApp(App):
             try:
                 if task is None:
                     return
-                case_name, output_folder, do_zip, cleanup, do_upload = task
-                self._run_zip_task(case_name, output_folder, do_zip, cleanup, do_upload)
+                case_name, output_folder, do_zip, cleanup, do_upload, entry = task
+                self._run_zip_task(case_name, output_folder, do_zip, cleanup, do_upload, entry)
             except Exception as e:
                 try:
                     self.call_from_thread(
@@ -1493,8 +1504,8 @@ class BatchSimuApp(App):
             try:
                 if task is None:
                     return
-                case_name, archive, cleanup = task
-                self._run_upload_task(case_name, archive, cleanup)
+                case_name, archive, cleanup, entry = task
+                self._run_upload_task(case_name, archive, cleanup, entry)
             except Exception as e:
                 try:
                     self.call_from_thread(
@@ -1506,7 +1517,7 @@ class BatchSimuApp(App):
                 self._upload_queue.task_done()
 
     def _run_zip_task(self, case_name: str, output_folder: Optional[str],
-                      do_zip: bool, cleanup: str, do_upload: bool):
+                      do_zip: bool, cleanup: str, do_upload: bool, entry: SceneEntry):
         sim = self.simulator
         if not do_zip:
             return
@@ -1521,6 +1532,9 @@ class BatchSimuApp(App):
             self.call_from_thread(self.log_line, line, kind)
 
         zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
+        if zipped:
+            entry.zip_done = True   # Zip column: Y -> D
+            self.call_from_thread(self.refresh_scene_queue)
         archive = f"{output_folder}{sim.zip_ext}"
         # Folder removal doesn't depend on the upload - settle it now.
         sim.cleanup_folder(case_name, output_folder, cleanup, zipped)
@@ -1531,17 +1545,20 @@ class BatchSimuApp(App):
         # Hand the upload to its own worker (async) or run it inline (sync);
         # the archive's own cleanup happens once the transfer outcome is known.
         if sim.upload_async:
-            self._upload_queue.put((case_name, archive, cleanup))
+            self._upload_queue.put((case_name, archive, cleanup, entry))
         else:
-            self._run_upload_task(case_name, archive, cleanup)
+            self._run_upload_task(case_name, archive, cleanup, entry)
 
-    def _run_upload_task(self, case_name: str, archive: str, cleanup: str):
+    def _run_upload_task(self, case_name: str, archive: str, cleanup: str, entry: SceneEntry):
         sim = self.simulator
 
         def on_line(line, kind):
             self.call_from_thread(self.log_line, line, kind)
 
         uploaded = sim.upload_case_output(case_name, archive, on_line=on_line)
+        if uploaded:
+            entry.upload_done = True   # Upl column: Y -> D
+            self.call_from_thread(self.refresh_scene_queue)
         sim.cleanup_archive(case_name, archive, cleanup, zipped=True, uploaded=uploaded)
 
     @work(thread=True, exclusive=True)
@@ -1651,6 +1668,8 @@ class BatchSimuApp(App):
             entry.proc_holder = []
             entry.log_buffer = []
             entry.eta = None
+            entry.zip_done = False
+            entry.upload_done = False
             self.call_from_thread(self._mark_status, entry, STATUS_RUNNING)
 
             if not os.path.exists(entry.scene_path):
@@ -1724,12 +1743,12 @@ class BatchSimuApp(App):
                 if sim.zip_async:
                     self._zip_queue.put((
                         case_name, result.output_folder,
-                        entry.zip_output, entry.cleanup, entry.upload_output,
+                        entry.zip_output, entry.cleanup, entry.upload_output, entry,
                     ))
                 else:
                     self._run_zip_task(
                         case_name, result.output_folder,
-                        entry.zip_output, entry.cleanup, entry.upload_output,
+                        entry.zip_output, entry.cleanup, entry.upload_output, entry,
                     )
                 self.call_from_thread(self._mark_status, entry, STATUS_DONE)
             else:

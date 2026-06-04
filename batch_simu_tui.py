@@ -700,6 +700,10 @@ class BatchSimuApp(App):
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
         prev = table.cursor_row if table.row_count else None
+        # clear() below resets the scroll to the top, and restoring the cursor
+        # re-scrolls it into view; capture the live scroll so a periodic refresh
+        # of a long, scrolled queue doesn't snap back to the header.
+        prev_scroll_x, prev_scroll_y = table.scroll_x, table.scroll_y
         widths = self._compute_col_widths()
         # Mutating an existing column's width doesn't reliably re-flow the
         # layout, so re-create columns whenever the widths change.
@@ -738,7 +742,21 @@ class BatchSimuApp(App):
             ]
             table.add_row(*(styled_cell(v, w, sty) for v, w in zip(values, widths)))
         if prev is not None and 0 <= prev < table.row_count:
-            table.move_cursor(row=prev)
+            # scroll=False so the cursor restore doesn't fight the scroll
+            # restore below (which must win for a user-scrolled queue).
+            table.move_cursor(row=prev, scroll=False)
+        self._restore_queue_scroll(table, prev_scroll_x, prev_scroll_y)
+
+    def _restore_queue_scroll(self, table: DataTable, x: float, y: float):
+        # clear() zeroes the scroll and the cursor restore schedules a deferred
+        # "scroll cursor into view"; both would drag a mouse-scrolled queue back
+        # to the header. Re-apply the saved offset now (flicker-free first paint)
+        # and again on the table's own call_after_refresh queue, which runs after
+        # the cursor's deferred scroll so this pass wins.
+        def _apply():
+            table.scroll_to(x=x, y=y, animate=False)
+        _apply()
+        table.call_after_refresh(_apply)
 
     def reset_run_controls(self):
         self.query_one("#start_btn", Button).disabled = False

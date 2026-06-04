@@ -81,6 +81,11 @@ QUEUE_COLS = [
     ("Errors", 7),
 ]
 
+# rclone's --stats-one-line progress line, e.g.
+# "... 30 MiB, 54%, 8.0 MiB/s, ETA 1s". Captures the percent so long uploads
+# can be throttled to one log line per 20% band.
+_UPLOAD_PROGRESS_RE = re.compile(r"(\d+)%,.*ETA")
+
 
 def status_display(entry) -> str:
     s = entry.status
@@ -1569,8 +1574,20 @@ class BatchSimuApp(App):
 
     def _run_upload_task(self, case_name: str, archive: str, cleanup: str, entry: SceneEntry):
         sim = self.simulator
+        # rclone emits a progress line every --stats interval; a multi-hour
+        # upload would flood the log with them. Throttle to one line per
+        # upload_eta_step percent. Non-progress lines (errors, "Copied (new)",
+        # the final 100%) always pass through.
+        step = self.simulator.upload_eta_step
+        last_bucket = [-1]
 
         def on_line(line, kind):
+            m = _UPLOAD_PROGRESS_RE.search(line)
+            if m:
+                bucket = int(m.group(1)) // step
+                if bucket <= last_bucket[0]:
+                    return
+                last_bucket[0] = bucket
             self.call_from_thread(self.log_line, line, kind)
 
         uploaded = sim.upload_case_output(case_name, archive, on_line=on_line)

@@ -185,7 +185,13 @@ class Simulator:
         self.upload_enabled = bool(up.get("enabled", False))
         self.rclone_path = up.get("rclone_path", "rclone")
         self.upload_remote = up.get("remote", "")
+        # Extra user rclone flags (e.g. --bwlimit, --transfers). The progress
+        # mechanics (--stats-one-line -v --stats) are injected in
+        # upload_case_output, not configured here, so they can't be dropped by
+        # mistake; the TUI throttles those progress lines to one per
+        # eta_step_percent (1..100; 20 -> a line every 20%).
         self.upload_args: List[str] = list(up.get("args", []))
+        self.upload_eta_step = max(1, min(100, int(up.get("eta_step_percent", 20))))
         # When True (default), the TUI uploads on its own background worker -
         # separate from zip - so a transfer overlaps zipping the next case.
         # False uploads inline (blocks the zip step until the transfer ends).
@@ -424,7 +430,17 @@ class Simulator:
         if not os.path.isfile(zip_file):
             self.info(f"Upload skipped for '{case_name}': archive '{zip_file}' not found", tag="Case")
             return False
-        cmd = [self.rclone_path, "copy", *self.upload_args, zip_file, self.upload_remote]
+        # --stats-one-line -v --stats are required for the throttled periodic
+        # ETA lines to show (no -v -> rclone stays silent; multi-line stats
+        # break the throttle regex), so they're fixed here rather than left to
+        # config. 15s samples finer than the percent throttle so band edges
+        # land. User extras (--bwlimit, etc.) follow.
+        cmd = [
+            self.rclone_path, "copy",
+            "--stats-one-line", "-v", "--stats", "15s",
+            *self.upload_args,
+            zip_file, self.upload_remote,
+        ]
         try:
             if on_line is None:
                 subprocess.run(cmd, check=True)

@@ -11,7 +11,8 @@
     "async": true,
     "rclone_path": "rclone",
     "remote": "gdrive:batch_output/",
-    "args": ["--stats-one-line", "-v", "--stats", "30s"]
+    "eta_step_percent": 20,
+    "args": []
   },
   "simulator_profiles": [
     {

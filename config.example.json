@@ -12,7 +12,7 @@
     "rclone_path": "rclone",
     "remote": "gdrive:batch_output/",
     "eta_step_percent": 20,
-    "args": []
+    "args": ["--drive-chunk-size", "128M", "--timeout", "300s", "--contimeout", "60s", "--low-level-retries", "10", "--retries", "3", "--drive-stop-on-upload-limit"]
   },
   "simulator_profiles": [
     {

@@ -1584,10 +1584,16 @@ class BatchSimuApp(App):
         def on_line(line, kind):
             m = _UPLOAD_PROGRESS_RE.search(line)
             if m:
-                bucket = int(m.group(1)) // step
-                if bucket <= last_bucket[0]:
-                    return
-                last_bucket[0] = bucket
+                pct = int(m.group(1))
+                # Throttle to one line per band below 100%, but always let the
+                # 100% heartbeat through: rclone keeps emitting --stats lines
+                # while Drive finalises a big upload server-side, and dropping
+                # them (they share the top band) makes a live upload look frozen.
+                if pct < 100:
+                    bucket = pct // step
+                    if bucket <= last_bucket[0]:
+                        return
+                    last_bucket[0] = bucket
             self.call_from_thread(self.log_line, line, kind)
 
         uploaded = sim.upload_case_output(case_name, archive, on_line=on_line)

@@ -33,6 +33,21 @@ CLEANUP_KEEP = "keep"
 CLEANUP_FOLDER = "folder"
 CLEANUP_BOTH = "both"
 
+# Windows process (kernel scheduling) priority classes selectable via
+# simulator.priority. These map to the subprocess.*_PRIORITY_CLASS
+# creationflags, which exist only on Windows; getattr(..., 0) makes the whole
+# feature a harmless no-op on other platforms. "normal" -> 0 so the simulator
+# simply inherits the launcher's priority. With MPI the flag lands on
+# mpiexec.exe and Windows propagates the class to the spawned ranks.
+PRIORITY_FLAGS = {
+    "idle": getattr(subprocess, "IDLE_PRIORITY_CLASS", 0),
+    "below_normal": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0),
+    "normal": 0,
+    "above_normal": getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0),
+    "high": getattr(subprocess, "HIGH_PRIORITY_CLASS", 0),
+    "realtime": getattr(subprocess, "REALTIME_PRIORITY_CLASS", 0),
+}
+
 
 def load_config():
     if not CONFIG_PATH.is_file():
@@ -177,6 +192,12 @@ class Simulator:
         # batch worker to wait for each archive before moving on.
         self.zip_async = bool(sim.get("zip_async", True))
 
+        # Kernel scheduling priority for the simulator process. Unknown values
+        # fall back to "normal" (no change), matching how cleanup is handled.
+        priority = str(sim.get("priority", "normal")).lower().strip()
+        self.priority = priority if priority in PRIORITY_FLAGS else "normal"
+        self.priority_flag = PRIORITY_FLAGS[self.priority]
+
         # Optional post-zip upload of the archive to a cloud remote via
         # rclone. Runs after a successful zip and before cleanup; on the TUI
         # this rides the same async zip worker. See cleanup_case for how the
@@ -298,8 +319,9 @@ class Simulator:
             return total() if callable(total) else total
 
         self.tg.queue_message(f"#Case Summary '{case_name}' ({index+1}/{_t()}):")
+        prio = f" [priority: {self.priority}]" if self.priority != "normal" else ""
         self.info(
-            f"Processing '{case_name}' with '{os.path.basename(exe_path)}' ({index+1}/{_t()})",
+            f"Processing '{case_name}' with '{os.path.basename(exe_path)}' ({index+1}/{_t()}){prio}",
             tag="Case",
         )
 
@@ -312,6 +334,7 @@ class Simulator:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True,
             env=env,
+            creationflags=self.priority_flag,
         )
         if process_holder is not None:
             process_holder.append(process)

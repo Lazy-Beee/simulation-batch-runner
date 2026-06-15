@@ -4,7 +4,8 @@
     "zip_path": "7z.exe",
     "zip_ext": ".7z",
     "zip_args": ["-mx=5", "-mmt=on", "-m0=lzma2"],
-    "zip_async": true
+    "zip_async": true,
+    "priority": "normal"
   },
   "upload": {
     "enabled": false,

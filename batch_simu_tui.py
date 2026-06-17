@@ -182,6 +182,13 @@ class SceneEntry:
     # drives the live elapsed tick, force_stopped flags a user kill.
     proc_holder: list = field(default_factory=list, repr=False)
     run_start: Optional[float] = field(default=None, repr=False)
+    # Anchor for the live ETA countdown: parsed seconds of the most recent
+    # simulator ETA token, and the wall-clock time we captured it. The queue
+    # cell shows eta_anchor_seconds - (now - eta_anchor_at) so a stale token
+    # keeps ticking down between the simulator's (often sparse) ETA updates
+    # instead of sitting frozen. seconds=None marks a token we couldn't parse.
+    eta_anchor_seconds: Optional[int] = field(default=None, repr=False)
+    eta_anchor_at: Optional[float] = field(default=None, repr=False)
     force_stopped: bool = field(default=False, repr=False)
     zip_done: bool = field(default=False, repr=False)
     upload_done: bool = field(default=False, repr=False)
@@ -610,25 +617,43 @@ class BatchSimuApp(App):
         return f"{h}:{m:02d}:{s:02d}"
 
     @staticmethod
-    def _fmt_eta(eta_token: Optional[str]) -> str:
-        # Match _fmt_time's left-flush H:MM:SS format so Time and ETA line up.
-        # Accepts '<1m', 'XhYm', 'Xh Ym' (CAMMP), or 'Xm' (>=60 carries).
+    def _parse_eta_seconds(eta_token: Optional[str]) -> Optional[int]:
+        # Total seconds for a simulator ETA token, or None if unrecognised.
+        # Accepts '<1m', 'XhYm' / 'Xh Ym' (CAMMP), or 'Xm' (>=60 carries).
+        # Anchors the per-second countdown in the queue (see _fmt_eta_cell).
         if not eta_token:
-            return "-"
+            return None
         eta_token = eta_token.strip()
         if eta_token == "<1m":
-            h, mm = 0, 0
-        else:
-            m = re.match(r"(\d+)h\s*(\d+)m\Z", eta_token)
-            if m:
-                h, mm = int(m.group(1)), int(m.group(2))
-            else:
-                m = re.match(r"(\d+)m\Z", eta_token)
-                if m:
-                    h, mm = divmod(int(m.group(1)), 60)
-                else:
-                    return eta_token
-        return f"{h}:{mm:02d}:00"
+            return 0
+        m = re.match(r"(\d+)h\s*(\d+)m\Z", eta_token)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60
+        m = re.match(r"(\d+)m\Z", eta_token)
+        if m:
+            return int(m.group(1)) * 60
+        return None
+
+    @classmethod
+    def _fmt_eta(cls, eta_token: Optional[str]) -> str:
+        # Static H:MM:SS for a token (no countdown), matching _fmt_time's
+        # left-flush format so Time and ETA line up. Unparseable tokens show
+        # verbatim; _fmt_eta_cell falls back here for those.
+        if not eta_token:
+            return "-"
+        secs = cls._parse_eta_seconds(eta_token)
+        return cls._fmt_time(secs) if secs is not None else eta_token.strip()
+
+    def _fmt_eta_cell(self, entry: SceneEntry, now: float) -> str:
+        # Live ETA: count down from the last token's parsed seconds by the
+        # wall-clock elapsed since we captured it, so the cell keeps ticking
+        # between the simulator's sparse ETA updates. Floors at 0:00:00.
+        if not entry.eta:
+            return "-"
+        secs, at = entry.eta_anchor_seconds, entry.eta_anchor_at
+        if secs is None or at is None:
+            return self._fmt_eta(entry.eta)
+        return self._fmt_time(max(0, round(secs - (now - at))))
 
     def _format_case_tab_header(self, entry: SceneEntry) -> tuple[str, str, str]:
         case_line = f"Case: {self.simulator.case_name_from_path(entry.scene_path)}"
@@ -704,6 +729,7 @@ class BatchSimuApp(App):
 
     def refresh_scene_queue(self):
         table = self.query_one("#scene_queue", DataTable)
+        now = _time.time()   # single clock read for every row's live ETA tick
         prev = table.cursor_row if table.row_count else None
         # clear() below resets the scroll to the top, and restoring the cursor
         # re-scrolls it into view; capture the live scroll so a periodic refresh
@@ -741,7 +767,7 @@ class BatchSimuApp(App):
                 self._fmt_stage(e.upload_output, e.upload_done),
                 status_display(e),
                 self._fmt_time(e.elapsed),
-                self._fmt_eta(e.eta),
+                self._fmt_eta_cell(e, now),
                 str(e.warnings),
                 str(e.errors),
             ]
@@ -1350,6 +1376,8 @@ class BatchSimuApp(App):
         entry.warnings = 0
         entry.errors = 0
         entry.eta = None
+        entry.eta_anchor_seconds = None
+        entry.eta_anchor_at = None
         entry.proc_holder = []
         entry.run_start = None
         entry.force_stopped = False
@@ -1490,6 +1518,8 @@ class BatchSimuApp(App):
         entry.status = status
         if status != STATUS_RUNNING:
             entry.eta = None
+            entry.eta_anchor_seconds = None
+            entry.eta_anchor_at = None
         self.refresh_scene_queue()
 
     def _zip_worker_loop(self):
@@ -1709,6 +1739,8 @@ class BatchSimuApp(App):
             entry.proc_holder = []
             entry.log_buffer = []
             entry.eta = None
+            entry.eta_anchor_seconds = None
+            entry.eta_anchor_at = None
             entry.zip_done = False
             entry.upload_done = False
             self.call_from_thread(self._mark_status, entry, STATUS_RUNNING)
@@ -1748,7 +1780,12 @@ class BatchSimuApp(App):
                 if kind == "step" and _eta_re is not None:
                     m = _eta_re.search(line)
                     if m and m.group(1) != _entry.eta:
+                        # Re-anchor only when the token text changes, so a
+                        # repeated estimate keeps counting down smoothly rather
+                        # than snapping back to its start each step line.
                         _entry.eta = m.group(1)
+                        _entry.eta_anchor_seconds = self._parse_eta_seconds(m.group(1))
+                        _entry.eta_anchor_at = _time.time()
                         self.call_from_thread(self.refresh_scene_queue)
 
             try:

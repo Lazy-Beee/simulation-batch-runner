@@ -17,6 +17,7 @@ from textual import on, work, events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
+from textual.screen import ModalScreen
 from textual.widgets import (
     Footer, Input, Label, Button, Switch,
     Static, RichLog, ProgressBar,
@@ -270,6 +271,49 @@ class StepButton(Static):
             target.action_step(self._delta)
 
 
+class QuitConfirmScreen(ModalScreen[bool]):
+    """Confirm quitting while a batch / zip / upload is still in flight.
+
+    Dismisses True to quit (the caller then kills every child process so an
+    orphaned rclone / 7z doesn't keep holding the launching console) or False
+    to stay. Escape and the Cancel button both stay.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, summary: str):
+        super().__init__()
+        self._summary = summary
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="quit_dialog"):
+            yield Label("Work still in progress", id="quit_title")
+            yield Label(self._summary, id="quit_summary")
+            yield Label(
+                "Quitting now kills all running simulator, 7-Zip and rclone "
+                "processes; unfinished cases are left incomplete.",
+                id="quit_detail",
+            )
+            with Horizontal(id="quit_buttons"):
+                yield Button("Quit and kill all", variant="error", id="quit_yes")
+                yield Button("Cancel", variant="primary", id="quit_no")
+
+    def on_mount(self):
+        # Default focus to Cancel so a stray Enter doesn't kill the batch.
+        self.query_one("#quit_no", Button).focus()
+
+    @on(Button.Pressed, "#quit_yes")
+    def _confirm(self):
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#quit_no")
+    def _cancel(self):
+        self.dismiss(False)
+
+    def action_cancel(self):
+        self.dismiss(False)
+
+
 class BatchSimuApp(App):
     CSS = """
     Screen { layout: vertical; }
@@ -372,6 +416,18 @@ class BatchSimuApp(App):
     #current_case_label { color: $accent; text-style: bold; }
 
     #summary_label { padding: 1; text-style: bold; }
+
+    /* Quit-confirmation modal: centered dialog over the dimmed app. */
+    QuitConfirmScreen { align: center middle; }
+    #quit_dialog {
+        width: 66; height: auto;
+        padding: 1 2; border: thick $error;
+        background: $surface;
+    }
+    #quit_title { width: 100%; text-style: bold; color: $error; }
+    #quit_summary { width: 100%; margin-top: 1; }
+    #quit_detail { width: 100%; margin-top: 1; color: $text-muted; }
+    #quit_buttons { width: 100%; height: auto; align: center middle; margin-top: 1; }
     """
 
     BINDINGS = [
@@ -416,6 +472,12 @@ class BatchSimuApp(App):
         # case (disk). Gated independently by upload.async. Drained after zips.
         self._upload_queue: queue.Queue = queue.Queue()
         self._upload_worker: Optional[threading.Thread] = None
+        # Live 7-Zip / rclone Popen handles, keyed by id(holder), so a confirmed
+        # quit can kill them instead of orphaning the processes (an orphaned
+        # rclone keeps the launching console busy). Each zip / upload task
+        # registers its own holder for the duration of its run.
+        self._aux_holders: dict[int, list] = {}
+        self._aux_lock = threading.Lock()
 
         # Multi-select for the queue table. Stores id(entry) so stale row
         # indices after reorder / remove don't shadow current selections.
@@ -1584,7 +1646,14 @@ class BatchSimuApp(App):
         def zip_on_line(line, kind):
             self.call_from_thread(self.log_line, line, kind)
 
-        zipped = sim.zip_case_output(case_name, output_folder, on_line=zip_on_line)
+        zip_holder: list = []
+        self._track_aux_proc(zip_holder)
+        try:
+            zipped = sim.zip_case_output(
+                case_name, output_folder, on_line=zip_on_line, process_holder=zip_holder,
+            )
+        finally:
+            self._untrack_aux_proc(zip_holder)
         if zipped:
             entry.zip_done = True   # Zip column: Y -> D
             self.call_from_thread(self.refresh_scene_queue)
@@ -1626,7 +1695,14 @@ class BatchSimuApp(App):
                     last_bucket[0] = bucket
             self.call_from_thread(self.log_line, line, kind)
 
-        uploaded = sim.upload_case_output(case_name, archive, on_line=on_line)
+        upload_holder: list = []
+        self._track_aux_proc(upload_holder)
+        try:
+            uploaded = sim.upload_case_output(
+                case_name, archive, on_line=on_line, process_holder=upload_holder,
+            )
+        finally:
+            self._untrack_aux_proc(upload_holder)
         if uploaded:
             entry.upload_done = True   # Upl column: Y -> D
             self.call_from_thread(self.refresh_scene_queue)
@@ -1839,7 +1915,77 @@ class BatchSimuApp(App):
                 self._batch_results.append(rec)
             sem.release()
 
+    def _track_aux_proc(self, holder: list):
+        with self._aux_lock:
+            self._aux_holders[id(holder)] = holder
+
+    def _untrack_aux_proc(self, holder: list):
+        with self._aux_lock:
+            self._aux_holders.pop(id(holder), None)
+
+    def _has_active_work(self) -> bool:
+        """True while a batch is running or any zip / cleanup / upload task is
+        still queued or in flight - i.e. quitting now would strand work."""
+        if self.batch_running:
+            return True
+        if self._zip_queue.unfinished_tasks or self._upload_queue.unfinished_tasks:
+            return True
+        with self._aux_lock:
+            return bool(self._aux_holders)
+
+    def _active_work_summary(self) -> str:
+        running = sum(1 for e in self.scene_entries if e.status == STATUS_RUNNING)
+        zips = self._zip_queue.unfinished_tasks
+        ups = self._upload_queue.unfinished_tasks
+        parts = []
+        if running:
+            parts.append(f"{running} simulation(s) running")
+        if zips:
+            parts.append(f"{zips} zip/cleanup task(s) pending")
+        if ups:
+            parts.append(f"{ups} upload(s) pending")
+        if not parts:
+            parts.append("a background task in progress")
+        return "In progress: " + ", ".join(parts) + "."
+
+    def _kill_all_processes(self):
+        """Terminate every live child process - the simulators plus the 7-Zip /
+        rclone procs spawned by zip & upload tasks - so none are left orphaned.
+        kill_proc_tree no-ops on already-dead handles, so stale entries are safe."""
+        self.stop_requested = True   # stop the coordinator dispatching new cases
+        for entry in self.scene_entries:
+            for proc in list(entry.proc_holder):
+                kill_proc_tree(proc)
+        with self._aux_lock:
+            holders = list(self._aux_holders.values())
+        for holder in holders:
+            for proc in list(holder):
+                kill_proc_tree(proc)
+
+    async def action_quit(self):
+        # ctrl+q while the dialog is already up is a no-op (don't stack it).
+        if isinstance(self.screen, QuitConfirmScreen):
+            return
+        if self._has_active_work():
+            self.push_screen(
+                QuitConfirmScreen(self._active_work_summary()), self._on_quit_confirm,
+            )
+            return
+        self.exit()
+
+    def _on_quit_confirm(self, do_quit: Optional[bool]):
+        if do_quit:
+            self._kill_all_processes()
+            self.exit()
+
     def on_unmount(self):
+        # Safety net for every teardown path - including ones that bypass the
+        # quit dialog (Ctrl+C, an unhandled crash, the terminal closing): kill
+        # all child procs first so nothing is orphaned, then drop the exe copies
+        # (now deletable, since their simulator no longer holds the file open).
+        # On a confirmed quit this is a harmless second pass (kill_proc_tree
+        # no-ops on dead handles).
+        self._kill_all_processes()
         for entry in self.scene_entries:
             self._cleanup_entry_exe(entry)
 

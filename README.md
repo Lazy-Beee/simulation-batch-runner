@@ -125,7 +125,7 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | `Ctrl+X` | STOP (graceful) — hidden from Footer to keep key order stable while an Input is focused |
 | `Ctrl+L` | Clear log |
 | `Ctrl+W` | Close current case tab (Queue / Running are pinned) — hidden from Footer; inside an Input it's the Input's own delete-word |
-| `Ctrl+Q` | Quit |
+| `Ctrl+Q` | Quit — if a batch / zip / upload is still in flight, asks to confirm; confirming kills every running simulator, 7-Zip and rclone process so none are left orphaned |
 | `F1` / `F2` | Jump to Queue / Running |
 | `Space` | Toggle multi-select on the cursor row |
 | `Ctrl+A` / `Esc` | Select all / clear selection (hidden from Footer) |

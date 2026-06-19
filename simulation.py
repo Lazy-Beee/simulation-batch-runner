@@ -391,6 +391,7 @@ class Simulator:
         case_name: str,
         output_folder: str,
         on_line: Optional[Callable[[str, str], None]] = None,
+        process_holder: Optional[list] = None,
     ) -> bool:
         """Archive the case output via 7-Zip.
 
@@ -417,6 +418,8 @@ class Simulator:
                     bufsize=1,
                     universal_newlines=True,
                 )
+                if process_holder is not None:
+                    process_holder.append(proc)
                 for line in proc.stdout:
                     on_line(line, "raw")
                 proc.wait()
@@ -433,6 +436,7 @@ class Simulator:
         case_name: str,
         zip_file: str,
         on_line: Optional[Callable[[str, str], None]] = None,
+        process_holder: Optional[list] = None,
     ) -> bool:
         """Upload a case archive to the configured rclone remote.
 
@@ -477,6 +481,8 @@ class Simulator:
                     bufsize=1,
                     universal_newlines=True,
                 )
+                if process_holder is not None:
+                    process_holder.append(proc)
                 for line in proc.stdout:
                     on_line(line, "raw")
                 proc.wait()

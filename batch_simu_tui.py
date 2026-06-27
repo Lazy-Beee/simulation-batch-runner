@@ -53,7 +53,7 @@ FINISHED_STATUSES = {STATUS_DONE, STATUS_FAILED, STATUS_MISSING, STATUS_ERROR, S
 
 ROW_STYLE_BY_STATUS = {
     STATUS_PENDING: "",
-    STATUS_RUNNING: "on yellow",
+    STATUS_RUNNING: "black on yellow",
     STATUS_DONE: "on dark_green",
     STATUS_FAILED: "on red3",
     STATUS_MISSING: "on red3",

@@ -131,6 +131,10 @@ Quoted-with-spaces paths from Windows Terminal are stripped automatically.
 | `Ctrl+A` / `Esc` | Select all / clear selection (hidden from Footer) |
 | `Up` / `Down` | Step the focused numeric field (OMP / MPI / Parallel) by ±1, clamped at its minimum |
 
+Quitting (`Ctrl+Q`) while a batch / zip / upload is still in flight brings up a confirmation dialog first; confirming kills every running simulator, 7-Zip and rclone process so none are left orphaned, while Cancel keeps the app running.
+
+![Quit-confirmation dialog: "Work still in progress" over the dimmed Queue tab, with "Quit and kill all" and "Cancel" buttons](https://github.com/Lazy-Beee/simulation-batch-runner/releases/latest/download/tui-quit-confirm.png)
+
 ## Usage — CLI
 
 ```powershell

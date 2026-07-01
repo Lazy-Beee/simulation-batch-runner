@@ -1736,6 +1736,17 @@ class BatchSimuApp(App):
                     self.call_from_thread(self.log_line, "--- Batch stopped by user ---", "warning")
                     break
                 if i >= len(self.scene_entries):
+                    # Reached the end of the queue as it stands - but a case
+                    # may still be running, and a mid-batch Add appends new
+                    # pending entries past the current end. Don't finish while
+                    # any dispatched runner is alive: wait briefly, then re-read
+                    # len(scene_entries) so a just-added case gets dispatched
+                    # below instead of stranded. Only break once the tail is
+                    # reached with nothing in flight.
+                    alive = [t for t in runners if t.is_alive()]
+                    if alive:
+                        alive[0].join(timeout=0.2)
+                        continue
                     break
                 entry = self.scene_entries[i]
                 if entry.status != STATUS_PENDING:
